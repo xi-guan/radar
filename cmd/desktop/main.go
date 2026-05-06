@@ -168,7 +168,7 @@ func main() {
 			Handler: NewRedirectHandler(srv.ActualAddr(), cfg.Namespace),
 		},
 
-		Menu: createMenu(desktopApp),
+		Menu: createMenu(desktopApp, version),
 
 		BackgroundColour: options.NewRGBA(10, 10, 15, 255),
 
