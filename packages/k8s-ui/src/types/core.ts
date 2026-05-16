@@ -424,7 +424,8 @@ export interface Relationships {
   consumers?: ResourceRef[]
   scalers?: ResourceRef[]
   scaleTarget?: ResourceRef
-  policies?: ResourceRef[]
+  pdbs?: ResourceRef[]              // PodDisruptionBudgets protecting this workload
+  networkPolicies?: ResourceRef[]   // NetworkPolicy / CiliumNetworkPolicy / ClusterNetworkPolicy variants selecting this workload
   pods?: ResourceRef[]
 }
 

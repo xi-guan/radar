@@ -724,7 +724,8 @@ export function RelatedResourcesSection({ relationships, onNavigate }: RelatedRe
     (relationships.configRefs && relationships.configRefs.length > 0) ||
     (relationships.consumers && relationships.consumers.length > 0) ||
     (relationships.scalers && relationships.scalers.length > 0) ||
-    (relationships.policies && relationships.policies.length > 0) ||
+    (relationships.pdbs && relationships.pdbs.length > 0) ||
+    (relationships.networkPolicies && relationships.networkPolicies.length > 0) ||
     relationships.scaleTarget
 
   if (!hasRelationships) return null
@@ -765,25 +766,12 @@ export function RelatedResourcesSection({ relationships, onNavigate }: RelatedRe
         {relationships.scalers && relationships.scalers.length > 0 && (
           <RelationshipGroup label="Autoscaler" refs={dedupeRefs(relationships.scalers)} onNavigate={onNavigate} />
         )}
-        {relationships.policies && relationships.policies.length > 0 && (() => {
-          const policyKinds = new Set(['NetworkPolicy', 'CiliumNetworkPolicy', 'CiliumClusterwideNetworkPolicy', 'ClusterNetworkPolicy'])
-          const pdbs = relationships.policies.filter(r => r.kind === 'PodDisruptionBudget')
-          const netpols = relationships.policies.filter(r => policyKinds.has(r.kind))
-          const other = relationships.policies.filter(r => r.kind !== 'PodDisruptionBudget' && !policyKinds.has(r.kind))
-          return (
-            <>
-              {pdbs.length > 0 && (
-                <RelationshipGroup label="Disruption Budget" refs={dedupeRefs(pdbs)} onNavigate={onNavigate} />
-              )}
-              {netpols.length > 0 && (
-                <RelationshipGroup label="Network Policies" refs={dedupeRefs(netpols)} onNavigate={onNavigate} />
-              )}
-              {other.length > 0 && (
-                <RelationshipGroup label="Policies" refs={dedupeRefs(other)} onNavigate={onNavigate} />
-              )}
-            </>
-          )
-        })()}
+        {relationships.pdbs && relationships.pdbs.length > 0 && (
+          <RelationshipGroup label="Disruption Budget" refs={dedupeRefs(relationships.pdbs)} onNavigate={onNavigate} />
+        )}
+        {relationships.networkPolicies && relationships.networkPolicies.length > 0 && (
+          <RelationshipGroup label="Network Policies" refs={dedupeRefs(relationships.networkPolicies)} onNavigate={onNavigate} />
+        )}
         {relationships.scaleTarget && (
           <RelationshipGroup label="Scale Target" refs={[relationships.scaleTarget]} onNavigate={onNavigate} />
         )}

@@ -147,8 +147,26 @@ func GetRelationships(kind, namespace, name string, topo *Topology, provider Res
 				// HPA/ScaledObject/ScaledJob scales a workload
 				rel.ScaleTarget = ref
 			case EdgeProtects:
-				// PDB protects a workload (outgoing from PDB)
-				rel.ScaleTarget = ref
+				// Outgoing EdgeProtects fires when the queried resource IS a
+				// PDB, NetworkPolicy, CiliumNetworkPolicy, or MachineHealthCheck —
+				// each of these emits a "protects/selects target workload" edge.
+				//
+				// Intentionally NOT surfaced today. The existing per-resource
+				// relationship fields (PDBs, NetworkPolicies, Scalers, etc.)
+				// describe "things that act on me," not "things I act on" —
+				// so there's no semantically correct field to land outgoing
+				// protects refs in.
+				//
+				// Previously this case wrote to rel.ScaleTarget (bug B1) and
+				// then briefly to rel.PDBs (which conflated PDB-side and NP-
+				// side outgoing edges into the same incoming-direction field).
+				// Both were wrong.
+				//
+				// TODO: when we introduce a target-side "Protects []ResourceRef"
+				// field on Relationships, surface these refs there with their
+				// source kind preserved. Until then, leave the outgoing direction
+				// of EdgeProtects unsurfaced. The topology graph itself still
+				// carries these edges; only the per-resource projection skips them.
 			case EdgeConfigures:
 				// ConfigMap/Secret is used by a workload (outgoing from config)
 				rel.Consumers = append(rel.Consumers, *ref)
@@ -185,8 +203,14 @@ func GetRelationships(kind, namespace, name string, topo *Topology, provider Res
 				// An HPA/ScaledObject/ScaledJob scales this resource
 				rel.Scalers = append(rel.Scalers, *ref)
 			case EdgeProtects:
-				// A PDB protects this workload
-				rel.Policies = append(rel.Policies, *ref)
+				// Incoming EdgeProtects: dispatch on source kind so PDBs and
+				// NetworkPolicies land in distinct fields.
+				switch ref.Kind {
+				case "PodDisruptionBudget":
+					rel.PDBs = append(rel.PDBs, *ref)
+				case "NetworkPolicy", "CiliumNetworkPolicy", "ClusterNetworkPolicy", "CiliumClusterwideNetworkPolicy":
+					rel.NetworkPolicies = append(rel.NetworkPolicies, *ref)
+				}
 			case EdgeConfigures:
 				// A ConfigMap/Secret is used by this resource
 				rel.ConfigRefs = append(rel.ConfigRefs, *ref)
@@ -288,7 +312,8 @@ func GetRelationships(kind, namespace, name string, topo *Topology, provider Res
 	if rel.Owner == nil && rel.Deployment == nil && len(rel.Children) == 0 && len(rel.Services) == 0 &&
 		len(rel.Ingresses) == 0 && len(rel.Gateways) == 0 && len(rel.Routes) == 0 &&
 		len(rel.ConfigRefs) == 0 && len(rel.Consumers) == 0 && len(rel.Scalers) == 0 &&
-		len(rel.Policies) == 0 && rel.ScaleTarget == nil && len(rel.Pods) == 0 {
+		len(rel.PDBs) == 0 && len(rel.NetworkPolicies) == 0 &&
+		rel.ScaleTarget == nil && len(rel.Pods) == 0 {
 		return nil
 	}
 
