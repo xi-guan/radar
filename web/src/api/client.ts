@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient, skipToken } from '@tanstack/react-query'
 import { showApiError, showApiSuccess } from '../components/ui/Toast'
 import { useCanHelmWrite } from '../contexts/CapabilitiesContext'
@@ -1220,19 +1221,21 @@ export interface PrometheusStatus {
   error?: string
 }
 
-export interface PrometheusDataPoint {
-  timestamp: number
-  value: number
-}
+// Time-series sample types live in @skyhook-io/k8s-ui (shared with library
+// consumers). Re-export here so radar-app callers keep their existing import
+// paths; the Prom-prefixed names are deprecated aliases.
+export type {
+  TimeSeriesPoint,
+  TimeSeries,
+  PrometheusDataPoint,
+  PrometheusSeries,
+} from '@skyhook-io/k8s-ui/components/charts'
 
-export interface PrometheusSeries {
-  labels: Record<string, string>
-  dataPoints: PrometheusDataPoint[]
-}
+import type { TimeSeries as ChartTimeSeries } from '@skyhook-io/k8s-ui/components/charts'
 
 export interface PrometheusQueryResult {
   resultType: string
-  series: PrometheusSeries[]
+  series: ChartTimeSeries[]
 }
 
 export interface PrometheusResourceMetrics {
@@ -1247,8 +1250,43 @@ export interface PrometheusResourceMetrics {
   hint?: string  // Contextual hint when results are empty (e.g. cri-docker label issues)
 }
 
-export type PrometheusMetricCategory = 'cpu' | 'memory' | 'network_rx' | 'network_tx' | 'filesystem'
+export type PrometheusMetricCategory = 'cpu' | 'memory' | 'network_rx' | 'network_tx' | 'filesystem' | 'restarts'
 export type PrometheusTimeRange = '10m' | '30m' | '1h' | '3h' | '6h' | '12h' | '24h' | '48h' | '7d' | '14d'
+
+// PVC usage at a moment in time, derived from kubelet_volume_stats_*.
+// HasData=false silently indicates the CSI driver doesn't report or Prom
+// isn't scraping kubelet endpoints — UI should hide the gauge in that case.
+export interface PrometheusPVCUsage {
+  namespace: string
+  name: string
+  used: number
+  capacity: number
+  ratio: number
+  hasData: boolean
+}
+
+export type RightsizingTone = 'ok' | 'info' | 'warning' | 'alert' | 'critical'
+
+export interface RightsizingRow {
+  container: string
+  resource: 'cpu' | 'memory'
+  currentRequest?: string
+  currentLimit?: string
+  p95?: string
+  recommendedRequest?: string
+  tone: RightsizingTone
+  message: string
+}
+
+export interface PrometheusRightsizing {
+  kind: string
+  namespace: string
+  name: string
+  window: string
+  sampleAvailable: boolean
+  rows: RightsizingRow[]
+  reason?: string
+}
 
 // Check Prometheus availability
 export function usePrometheusStatus() {
@@ -1280,6 +1318,86 @@ export function usePrometheusConnect() {
       successMessage: 'Connected to Prometheus',
     },
   })
+}
+
+// Auto-discover Prometheus on first mount of any Prom-backed view, and
+// auto-reconnect across radar restarts on subsequent mounts.
+//
+// Two paths through this hook, both running once per cluster context per
+// component-instance:
+//   1. Cached path — localStorage flag means "Prom was discovered before on
+//      this context". Probe fires immediately on mount; the user sees
+//      charts populate without manual interaction.
+//   2. First-time path — no flag yet. Probe fires after a small delay so the
+//      initial workload-view render lands before we hit the cluster network.
+//      Behavior matches Lens / Headlamp defaults; the trade-off is one
+//      cluster probe per session per fresh kubeconfig context.
+//
+// On success either way we set the flag, so subsequent mounts take path 1.
+// On failure we clear the flag (path 1) or leave it cleared (path 2) and
+// reset attemptedRef, so the existing "Discover Prometheus" CTA renders
+// once status refreshes. Manual interaction stays available as the fallback.
+//
+// localStorage is the right surface: connection intent is browser-local,
+// not a server-side preference, and we want it to persist across radar
+// restarts on the same port.
+const PROM_AUTOCONNECT_PREFIX = 'radar.prometheus.autoConnect:'
+// First-mount delay before probing the cluster. Chosen short enough that the
+// CTA → charts transition feels prompt, long enough that the probe doesn't
+// race the initial workload-view render.
+const PROM_FIRSTLAUNCH_PROBE_DELAY_MS = 500
+
+function promAutoConnectKey(contextName: string): string {
+  return `${PROM_AUTOCONNECT_PREFIX}${contextName}`
+}
+
+export function useAutoPromConnect(): void {
+  const queryClient = useQueryClient()
+  const { data: clusterInfo } = useClusterInfo()
+  const { data: status, isLoading: statusLoading } = usePrometheusStatus()
+  const attemptedRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const context = clusterInfo?.context
+    if (!context || statusLoading) return
+
+    // Persist the "we've connected here before" signal once a connection lands.
+    if (status?.connected) {
+      try { window.localStorage.setItem(promAutoConnectKey(context), '1') } catch {
+        // localStorage can throw in some restricted browser modes — fail open.
+      }
+      return
+    }
+
+    if (attemptedRef.current === context) return
+    let cached: string | null = null
+    try { cached = window.localStorage.getItem(promAutoConnectKey(context)) } catch {
+      cached = null
+    }
+
+    attemptedRef.current = context
+
+    // Cached path probes immediately; first-time path defers briefly so the
+    // initial UI render isn't competing with the cluster network call.
+    const delay = cached === '1' ? 0 : PROM_FIRSTLAUNCH_PROBE_DELAY_MS
+    const timeout = window.setTimeout(() => {
+      // Direct apiFetch (not via the usePrometheusConnect mutation) so the
+      // meta-driven toast handler stays silent — the user didn't click anything.
+      apiFetch(`${getApiBase()}/prometheus/connect`, { method: 'POST' })
+        .then(resp => {
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+          queryClient.invalidateQueries({ queryKey: ['prometheus-status'] })
+        })
+        .catch(() => {
+          try { window.localStorage.removeItem(promAutoConnectKey(context)) } catch {
+            // ignore — manual CTA will render once status refreshes
+          }
+          attemptedRef.current = null
+        })
+    }, delay)
+    return () => window.clearTimeout(timeout)
+  }, [clusterInfo?.context, status?.connected, statusLoading, queryClient])
 }
 
 // Fetch Prometheus metrics for a resource
@@ -1333,6 +1451,40 @@ export function usePrometheusClusterMetrics(
     queryFn: () =>
       fetchJSON(`/prometheus/cluster?category=${category}&range=${range}`),
     enabled,
+    staleTime: 30000,
+    refetchInterval: 60000,
+  })
+}
+
+// Fetch PVC usage. hasData=false when no series — UI should hide the gauge.
+export function usePrometheusPVCUsage(namespace: string, name: string, enabled = true) {
+  return useQuery<PrometheusPVCUsage>({
+    queryKey: ['prometheus-pvc-usage', namespace, name],
+    queryFn: () => fetchJSON(`/prometheus/pvc/${namespace}/${name}`),
+    enabled: enabled && Boolean(namespace && name),
+    staleTime: 60000,
+    refetchInterval: 120000,
+  })
+}
+
+// Fetch rightsizing recommendations for a workload (Deployment / StatefulSet / DaemonSet).
+export function usePrometheusRightsizing(kind: string, namespace: string, name: string, enabled = true) {
+  return useQuery<PrometheusRightsizing>({
+    queryKey: ['prometheus-rightsizing', kind, namespace, name],
+    queryFn: () => fetchJSON(`/prometheus/rightsizing/${kind}/${namespace}/${name}`),
+    enabled: enabled && Boolean(kind && namespace && name),
+    staleTime: 5 * 60 * 1000, // P95 over 24h is slow to shift; cache aggressively
+    refetchInterval: 10 * 60 * 1000,
+  })
+}
+
+// Raw PromQL query (range). Used by HPA charts for status_current_replicas etc.
+export function usePromQLRange(query: string, range: PrometheusTimeRange = '1h', enabled = true) {
+  return useQuery<PrometheusQueryResult>({
+    queryKey: ['promql-range', query, range],
+    queryFn: () =>
+      fetchJSON(`/prometheus/query?query=${encodeURIComponent(query)}&range=${range}`),
+    enabled: enabled && Boolean(query),
     staleTime: 30000,
     refetchInterval: 60000,
   })

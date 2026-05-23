@@ -26,6 +26,8 @@ func RegisterRoutes(r chi.Router) {
 	r.Get("/prometheus/namespace/{namespace}", handleNamespaceMetrics)
 	r.Get("/prometheus/cluster", handleClusterMetrics)
 	r.Get("/prometheus/query", handleRawQuery)
+	r.Get("/prometheus/pvc/{namespace}/{name}", handlePVCUsage)
+	r.Get("/prometheus/rightsizing/{kind}/{namespace}/{name}", handleRightsizing)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

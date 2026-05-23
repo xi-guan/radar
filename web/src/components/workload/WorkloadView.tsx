@@ -23,6 +23,9 @@ import {
   fetchJSON,
 } from '../../api/client'
 import { PrometheusCharts, isPrometheusSupported } from '../resource/PrometheusCharts'
+import { PrometheusChartsGrid } from '../resource/PrometheusChartsGrid'
+import { RestartEventLane } from '../resource/RestartChart'
+import { RightsizingStrip } from '../resource/RightsizingStrip'
 import { useResourceAudit, useResources } from '../../api/client'
 import { AuditAlerts } from '@skyhook-io/k8s-ui'
 import { WorkloadLogsViewer } from '../logs/WorkloadLogsViewer'
@@ -40,6 +43,8 @@ import { ServiceAccountRenderer } from '../resources/renderers/ServiceAccountRen
 import { RoleRenderer } from '../resources/renderers/RoleRenderer'
 import { RoleBindingRenderer } from '../resources/renderers/RoleBindingRenderer'
 import { NamespaceRenderer } from '../resources/renderers/NamespaceRenderer'
+import { HPARenderer } from '../resources/renderers/HPARenderer'
+import { PVCRenderer } from '../resources/renderers/PVCRenderer'
 import { CreateResourceDialog } from '../shared/CreateResourceDialog'
 import { cleanYamlForDuplicate } from '../../utils/skeleton-yaml'
 import { useDesktopDownload } from '../../hooks/useDesktopDownload'
@@ -55,6 +60,8 @@ const rendererOverrides: RendererOverrides = {
   RoleRenderer,
   RoleBindingRenderer,
   NamespaceRenderer,
+  HPARenderer,
+  PVCRenderer,
 }
 
 // ============================================================================
@@ -413,7 +420,7 @@ export function WorkloadView({
       // Render props
       renderLogsTab={(props) => <LogsTabContent {...props} />}
       renderMetricsTab={({ kind, namespace: ns, name: n }) => (
-        <PrometheusCharts kind={kind} namespace={ns} name={n} showEmptyState />
+        <MetricsTabContent kind={kind} namespace={ns} name={n} resource={resource} expanded={expanded} />
       )}
       isMetricsAvailable={(kind, res) =>
         isPrometheusSupported(kind) && !(kind === 'Pod' && res?.status?.phase === 'Pending')
@@ -677,6 +684,73 @@ function FluxSourceConsumersInner({ sourceKind, namespace, name }: { sourceKind:
           </button>
         ))}
       </div>
+    </div>
+  )
+}
+
+// Drawer mode: single chart + category tabs (compact for ~500px width).
+// Full-screen mode: multi-chart grid so CPU + Memory + Network can be
+// compared side-by-side without tab switching.
+function MetricsTabContent({ kind, namespace, name, resource, expanded }: {
+  kind: string
+  namespace: string
+  name: string
+  resource: any
+  expanded: boolean
+}) {
+  const showRightsizing = expanded && ['Deployment', 'StatefulSet', 'DaemonSet'].includes(kind)
+
+  if (expanded) {
+    return (
+      <div className="flex flex-col h-full">
+        {showRightsizing && (
+          <div className="px-4 pt-4">
+            <RightsizingStrip kind={kind} namespace={namespace} name={name} />
+          </div>
+        )}
+        <div className="flex-1 min-h-0">
+          <PrometheusChartsGrid
+            kind={kind}
+            namespace={namespace}
+            name={name}
+            resource={resource}
+          />
+        </div>
+      </div>
+    )
+  }
+
+  // Drawer fallback: single chart with tabs + restart lane below. The chart's
+  // time-range selector is mirrored to the restart lane so they stay aligned.
+  return (
+    <DrawerMetricsContent
+      kind={kind}
+      namespace={namespace}
+      name={name}
+      resource={resource}
+    />
+  )
+}
+
+function DrawerMetricsContent({ kind, namespace, name, resource }: {
+  kind: string
+  namespace: string
+  name: string
+  resource: any
+}) {
+  const [chartRange, setChartRange] = useState<import('../../api/client').PrometheusTimeRange>('1h')
+  const showRestartLane = kind !== 'Node'
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex-1 min-h-0">
+        <PrometheusCharts kind={kind} namespace={namespace} name={name} showEmptyState resource={resource} onTimeRangeChange={setChartRange} />
+      </div>
+      {showRestartLane && (
+        <div className="px-4 pb-4">
+          <RestartEventLane kind={kind} namespace={namespace} name={name} range={chartRange} />
+        </div>
+      )}
     </div>
   )
 }
