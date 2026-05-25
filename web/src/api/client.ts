@@ -3042,6 +3042,31 @@ export interface DiagCacheSyncStatus {
   promotedKinds?: string[]
 }
 
+export interface DiagSampleWindow {
+  count: number
+  last: number
+  min: number
+  p50: number
+  p95: number
+  p99: number
+  max: number
+}
+
+export interface DiagPerfSnapshot {
+  topology: {
+    totalBuilds: number
+    durationUs: DiagSampleWindow
+    nodeCount: DiagSampleWindow
+    edgeCount: DiagSampleWindow
+    payloadBytes: DiagSampleWindow
+    estimatedNodes: DiagSampleWindow
+  }
+  sse: {
+    totalBroadcasts: number
+    totalDrops: number
+  }
+}
+
 export interface DiagnosticsSnapshot {
   timestamp: string
   radarVersion: string
@@ -3136,6 +3161,7 @@ export interface DiagnosticsSnapshot {
   sse?: {
     connectedClients: number
   }
+  perf?: DiagPerfSnapshot
   runtime?: {
     heapMB: number
     heapObjectsK: number

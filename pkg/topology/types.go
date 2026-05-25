@@ -171,6 +171,8 @@ type Topology struct {
 	HiddenKinds             []string `json:"hiddenKinds,omitempty"`             // Resource kinds auto-hidden for performance
 	RequiresNamespaceFilter bool     `json:"requiresNamespaceFilter,omitempty"` // True if cluster is too large for all-namespace topology
 	CRDDiscoveryStatus      string   `json:"crdDiscoveryStatus,omitempty"`      // CRD discovery status: idle, discovering, ready
+	EstimatedNodes          int      `json:"estimatedNodes,omitempty"`          // Pre-build node count estimate from the large-cluster optimizer; exposed so SSE / UI can tune debounce + render mode off the same signal
+	SummaryMode             bool     `json:"summaryMode,omitempty"`             // True when the pod tier was collapsed into per-workload/service counts (see SummaryModeThreshold)
 }
 
 // StripNodeKinds removes nodes whose Kind is in deny, plus every edge that
@@ -214,7 +216,28 @@ const (
 )
 
 // Large cluster threshold - when pre-grouped node count exceeds this, apply optimizations
+// (aggressive pod grouping + auto-hide ConfigMaps/PVCs).
 const LargeClusterThreshold = 1000
+
+// Summary mode threshold - a second, higher tier above LargeClusterThreshold.
+// When a namespace-filtered build's estimated node count crosses this, the
+// builder drops the entire pod tier (no Pod / PodGroup nodes) and instead
+// rolls pod health up onto the owning workload (resources view) or routing
+// Service (traffic view) as a PodSummary. This bounds rendered nodes to
+// workloads + networking regardless of pod count — the fix for tabs hanging
+// on namespaces with thousands of pods.
+const SummaryModeThreshold = 2000
+
+// PodSummary aggregates pod health for a workload or service in summary mode,
+// stamped onto the owning node's Data as "podSummary". Invariant maintained by
+// addPodHealth: Total == Healthy + Degraded + Unhealthy. Unknown-phase pods are
+// counted as Unhealthy (matching the bucketing GroupPods uses for PodGroups).
+type PodSummary struct {
+	Total     int `json:"total"`
+	Healthy   int `json:"healthy"`
+	Degraded  int `json:"degraded"`
+	Unhealthy int `json:"unhealthy"`
+}
 
 // BuildOptions configures topology building
 type BuildOptions struct {
@@ -228,6 +251,7 @@ type BuildOptions struct {
 	IncludeGenericCRDs     bool // Include CRDs with owner refs to topology nodes (default: true)
 	ForRelationshipCache   bool // Skip large cluster guard — used for internal relationship cache builds
 	ShowPolicyEffect       bool // Evaluate NetworkPolicies and annotate edges with allow/block/unprotected
+	SummaryMode            bool // Collapse the pod tier into per-workload/service counts (set by Build when estimate ≥ SummaryModeThreshold)
 }
 
 // MatchesNamespace returns true if ns is in the allowed list.

@@ -45,3 +45,6 @@ export * from './components/cluster-switcher'
 
 // Compare (ResourceCompareView, CompareResourcePicker, normalize utilities)
 export * from './components/compare'
+
+// Perf instrumentation (ELK + structureKey timers, surfaced in diagnostics overlay)
+export * from './perf'

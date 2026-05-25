@@ -42,6 +42,7 @@ import (
 	"github.com/skyhook-io/radar/internal/timeline"
 	"github.com/skyhook-io/radar/internal/updater"
 	"github.com/skyhook-io/radar/internal/version"
+	"github.com/skyhook-io/radar/pkg/perfstats"
 	"github.com/skyhook-io/radar/pkg/rbac"
 	topology "github.com/skyhook-io/radar/pkg/topology"
 )
@@ -943,7 +944,16 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 		topo.StripNodeKinds(deny)
 	}
 
-	s.writeJSON(w, topo)
+	// Marshal once so we can record the exact wire size in perfstats.
+	// (writeJSON streams, which would force a counting-writer wrapper.)
+	data, err := json.Marshal(topo)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	perfstats.RecordTopologyPayload(len(data))
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {

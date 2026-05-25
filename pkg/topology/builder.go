@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -13,6 +14,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/skyhook-io/radar/pkg/perfstats"
 )
 
 // Builder constructs topology graphs from K8s resources
@@ -40,14 +43,17 @@ func (b *Builder) Build(opts BuildOptions) (*Topology, error) {
 		return nil, fmt.Errorf("resource provider not initialized")
 	}
 
+	start := time.Now()
+
 	// Detect large cluster and apply optimizations
-	isLargeCluster, hiddenKinds := b.detectLargeClusterAndOptimize(&opts)
+	isLargeCluster, hiddenKinds, estimatedNodes := b.detectLargeClusterAndOptimize(&opts)
 
 	// Large clusters without a namespace filter: skip the expensive build entirely.
 	// The frontend shows a "select namespace" prompt instead of a blank graph.
 	// ForRelationshipCache bypasses this guard — internal builds need the full graph
 	// for resource detail "Related Resources" lookups.
 	if isLargeCluster && len(opts.Namespaces) == 0 && !opts.ForRelationshipCache {
+		perfstats.RecordTopologyBuild(time.Since(start), 0, 0, estimatedNodes)
 		return &Topology{
 			Nodes:                   []Node{},
 			Edges:                   []Edge{},
@@ -55,7 +61,18 @@ func (b *Builder) Build(opts BuildOptions) (*Topology, error) {
 			LargeCluster:            true,
 			HiddenKinds:             hiddenKinds,
 			RequiresNamespaceFilter: true,
+			EstimatedNodes:          estimatedNodes,
 		}, nil
+	}
+
+	// Summary mode: a namespace the user has filtered to is still big enough
+	// to hang the tab if we render every pod. Collapse the pod tier into
+	// per-workload / per-service counts. Only kicks in for real (non-cache)
+	// namespace-filtered builds — the all-namespace large path already returns
+	// the RequiresNamespaceFilter prompt above, and the relationship cache
+	// needs the full graph.
+	if estimatedNodes >= SummaryModeThreshold && len(opts.Namespaces) > 0 && !opts.ForRelationshipCache {
+		opts.SummaryMode = true
 	}
 
 	var topo *Topology
@@ -77,13 +94,18 @@ func (b *Builder) Build(opts BuildOptions) (*Topology, error) {
 		topo.LargeCluster = true
 		topo.HiddenKinds = hiddenKinds
 	}
+	topo.EstimatedNodes = estimatedNodes
+	topo.SummaryMode = opts.SummaryMode
 
+	perfstats.RecordTopologyBuild(time.Since(start), len(topo.Nodes), len(topo.Edges), estimatedNodes)
 	return topo, nil
 }
 
-// detectLargeClusterAndOptimize checks if cluster is large and applies optimizations
-// Returns true if large cluster detected, and list of hidden kinds
-func (b *Builder) detectLargeClusterAndOptimize(opts *BuildOptions) (bool, []string) {
+// detectLargeClusterAndOptimize checks if cluster is large and applies optimizations.
+// Returns: large-cluster flag, hidden kinds, and the estimated node count itself
+// (exposed so callers — eg. the SSE broadcaster — can drive debounce / render-mode
+// decisions off the same signal that drives the in-builder optimizations here).
+func (b *Builder) detectLargeClusterAndOptimize(opts *BuildOptions) (bool, []string, int) {
 	// Quick count of workload resources to estimate total node count
 	// This is a lightweight check - we count core resources that contribute most to topology
 	estimatedNodes := 0
@@ -186,7 +208,7 @@ func (b *Builder) detectLargeClusterAndOptimize(opts *BuildOptions) (bool, []str
 
 	// Check if large cluster
 	if estimatedNodes < LargeClusterThreshold {
-		return false, nil
+		return false, nil, estimatedNodes
 	}
 
 	// Large cluster detected - apply optimizations
@@ -205,7 +227,7 @@ func (b *Builder) detectLargeClusterAndOptimize(opts *BuildOptions) (bool, []str
 		hiddenKinds = append(hiddenKinds, "PersistentVolumeClaim")
 	}
 
-	return true, hiddenKinds
+	return true, hiddenKinds, estimatedNodes
 }
 
 // buildResourcesTopology creates a comprehensive resource view
@@ -2667,7 +2689,39 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		}
 		pods = ps
 	}
-	if len(pods) > 0 {
+	// podSummaries accumulates per-workload pod health in summary mode; stamped
+	// onto the workload nodes just before return. Empty (and the stamp a no-op)
+	// in normal mode.
+	podSummaries := make(map[string]*PodSummary)
+	if len(pods) > 0 && opts.SummaryMode {
+		// Summary mode: collapse the pod tier entirely. Roll each pod's health
+		// onto its owning workload node. Pods with no resolvable workload
+		// (standalone, bare ReplicaSet, or a controller whose node wasn't
+		// created) are aggregated into ONE summary-only node per namespace —
+		// counts only, no per-pod array and no expand affordance — so a large
+		// orphan set can't re-introduce the pod-tier payload/render cost.
+		existingNodeIDs := make(map[string]bool, len(nodes))
+		for _, n := range nodes {
+			existingNodeIDs[n.ID] = true
+		}
+		orphanByNS := make(map[string]*PodSummary)
+		orphanRestarts := make(map[string]int32)
+		for _, pod := range pods {
+			if !opts.MatchesNamespaceFilter(pod.Namespace) {
+				continue
+			}
+			workloadID := b.resolvePodWorkloadID(pod, existingNodeIDs, replicaSetToDeployment, replicaSetToRollout, jobIDs)
+			if workloadID == "" {
+				addPodHealth(orphanByNS, pod.Namespace, pod)
+				orphanRestarts[pod.Namespace] += ComputePodRestarts(pod)
+				continue
+			}
+			addPodHealth(podSummaries, workloadID, pod)
+		}
+		for ns, summary := range orphanByNS {
+			nodes = append(nodes, CreateOrphanPodSummaryNode(ns, *summary, orphanRestarts[ns]))
+		}
+	} else if len(pods) > 0 {
 		// Group pods using shared grouping logic
 		groupingResult := GroupPods(pods, PodGroupingOptions{
 			Namespaces: opts.Namespaces,
@@ -5180,6 +5234,9 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		annotateNodePolicyCoverage(nodes, edges, netpols, deployments, statefulsets, daemonsets)
 	}
 
+	// Summary mode: stamp collapsed pod counts onto their workload nodes.
+	stampPodSummaries(nodes, podSummaries)
+
 	topo := &Topology{Nodes: nodes, Edges: edges, Warnings: warnings}
 
 	// Add CRD discovery status
@@ -6656,43 +6713,59 @@ func (b *Builder) buildTrafficTopology(opts BuildOptions) (*Topology, error) {
 		ServiceIDs:      serviceIDs,
 	})
 
-	// Create nodes and edges for each group
-	// Use MaxIndividualPods threshold to decide whether to show individual pods or group them
-	maxIndividualPods := opts.MaxIndividualPods
-	if maxIndividualPods <= 0 {
-		maxIndividualPods = 5 // Default threshold
-	}
+	if opts.SummaryMode {
+		// Summary mode: collapse the pod tier. In traffic view the routing
+		// Service is the unit a user reasons about, so roll each group's pod
+		// health onto every Service that routes to it. No Pod / PodGroup nodes
+		// are emitted; the Service nodes (built above) carry the counts.
+		podSummaries := make(map[string]*PodSummary)
+		for _, group := range groupingResult.Groups {
+			for svcID := range group.ServiceIDs {
+				for _, pod := range group.Pods {
+					addPodHealth(podSummaries, svcID, pod)
+				}
+			}
+		}
+		stampPodSummaries(nodes, podSummaries)
+	} else {
+		// Create nodes and edges for each group
+		// Use MaxIndividualPods threshold to decide whether to show individual pods or group them
+		maxIndividualPods := opts.MaxIndividualPods
+		if maxIndividualPods <= 0 {
+			maxIndividualPods = 5 // Default threshold
+		}
 
-	for _, group := range groupingResult.Groups {
-		if len(group.Pods) <= maxIndividualPods {
-			// Small group - show as individual nodes
-			for _, pod := range group.Pods {
-				podID := GetPodID(pod)
-				nodes = append(nodes, CreatePodNode(pod, b.provider, false)) // includeNodeName=false for traffic view
+		for _, group := range groupingResult.Groups {
+			if len(group.Pods) <= maxIndividualPods {
+				// Small group - show as individual nodes
+				for _, pod := range group.Pods {
+					podID := GetPodID(pod)
+					nodes = append(nodes, CreatePodNode(pod, b.provider, false)) // includeNodeName=false for traffic view
 
-				// Add edges from services to pod (traffic view specific)
+					// Add edges from services to pod (traffic view specific)
+					for svcID := range group.ServiceIDs {
+						edges = append(edges, Edge{
+							ID:     fmt.Sprintf("%s-to-%s", svcID, podID),
+							Source: svcID,
+							Target: podID,
+							Type:   EdgeRoutesTo,
+						})
+					}
+				}
+			} else {
+				// Large group - create PodGroup node
+				podGroupID := GetPodGroupID(group)
+				nodes = append(nodes, CreatePodGroupNode(group, b.provider))
+
+				// Add edges from services to pod group (traffic view specific)
 				for svcID := range group.ServiceIDs {
 					edges = append(edges, Edge{
-						ID:     fmt.Sprintf("%s-to-%s", svcID, podID),
+						ID:     fmt.Sprintf("%s-to-%s", svcID, podGroupID),
 						Source: svcID,
-						Target: podID,
+						Target: podGroupID,
 						Type:   EdgeRoutesTo,
 					})
 				}
-			}
-		} else {
-			// Large group - create PodGroup node
-			podGroupID := GetPodGroupID(group)
-			nodes = append(nodes, CreatePodGroupNode(group, b.provider))
-
-			// Add edges from services to pod group (traffic view specific)
-			for svcID := range group.ServiceIDs {
-				edges = append(edges, Edge{
-					ID:     fmt.Sprintf("%s-to-%s", svcID, podGroupID),
-					Source: svcID,
-					Target: podGroupID,
-					Type:   EdgeRoutesTo,
-				})
 			}
 		}
 	}
@@ -6705,6 +6778,106 @@ func (b *Builder) buildTrafficTopology(opts BuildOptions) (*Topology, error) {
 	}
 
 	return topo, nil
+}
+
+// resolvePodWorkloadID returns the node ID of the top-level workload that owns
+// the pod and that actually exists as a node in the current build — used by
+// summary mode to attribute pod health counts. Returns "" when the pod has no
+// resolvable workload node (standalone pods, bare ReplicaSets with no Deployment
+// parent); those callers fall back to a collapsed PodGroup so the pods stay
+// visible without flooding the graph.
+//
+// Mirrors the owner resolution in createPodOwnerEdges, but resolves through
+// ReplicaSet → Deployment/Rollout (ReplicaSets are noisy intermediates hidden
+// by default and not the unit a user reasons about at scale).
+func (b *Builder) resolvePodWorkloadID(
+	pod *corev1.Pod,
+	existingNodeIDs map[string]bool,
+	replicaSetToDeployment map[string]string,
+	replicaSetToRollout map[string]string,
+	jobIDs map[string]string,
+) string {
+	for _, ownerRef := range pod.OwnerReferences {
+		if ownerRef.Controller == nil || !*ownerRef.Controller {
+			continue
+		}
+		ownerKey := pod.Namespace + "/" + ownerRef.Name
+		switch ownerRef.Kind {
+		case "ReplicaSet":
+			// These maps only hold IDs of nodes that were actually created.
+			if deployID, ok := replicaSetToDeployment[ownerKey]; ok {
+				return deployID
+			}
+			if rolloutID, ok := replicaSetToRollout[ownerKey]; ok {
+				return rolloutID
+			}
+			return "" // bare ReplicaSet — no workload node to attribute to
+		case "DaemonSet":
+			// Unlike the map-backed cases, the DaemonSet/StatefulSet node ID is
+			// synthesized from the owner ref — so it may name a node that was
+			// never created (e.g. the controller list was denied by RBAC while
+			// pods are listable). Gate on the real node set so those pods fall
+			// through to the orphan PodGroup instead of vanishing.
+			if id := fmt.Sprintf("daemonset/%s/%s", pod.Namespace, ownerRef.Name); existingNodeIDs[id] {
+				return id
+			}
+			return ""
+		case "StatefulSet":
+			if id := fmt.Sprintf("statefulset/%s/%s", pod.Namespace, ownerRef.Name); existingNodeIDs[id] {
+				return id
+			}
+			return ""
+		case "Job":
+			if jobID, ok := jobIDs[ownerKey]; ok {
+				return jobID
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+// addPodHealth accumulates a single pod's health into a PodSummary map keyed by
+// node ID. Used by summary mode to roll pods up onto workloads/services.
+func addPodHealth(summaries map[string]*PodSummary, nodeID string, pod *corev1.Pod) {
+	s := summaries[nodeID]
+	if s == nil {
+		s = &PodSummary{}
+		summaries[nodeID] = s
+	}
+	s.Total++
+	switch getPodStatus(string(pod.Status.Phase)) {
+	case StatusHealthy:
+		s.Healthy++
+	case StatusDegraded:
+		s.Degraded++
+	default:
+		s.Unhealthy++
+	}
+}
+
+// stampPodSummaries writes accumulated PodSummary counts onto the matching
+// nodes' Data under "podSummary". Nodes is a value slice, so we mutate in place
+// by index.
+func stampPodSummaries(nodes []Node, summaries map[string]*PodSummary) {
+	if len(summaries) == 0 {
+		return
+	}
+	for i := range nodes {
+		s, ok := summaries[nodes[i].ID]
+		if !ok {
+			continue
+		}
+		if nodes[i].Data == nil {
+			nodes[i].Data = map[string]any{}
+		}
+		nodes[i].Data["podSummary"] = map[string]any{
+			"total":     s.Total,
+			"healthy":   s.Healthy,
+			"degraded":  s.Degraded,
+			"unhealthy": s.Unhealthy,
+		}
+	}
 }
 
 // Helper functions

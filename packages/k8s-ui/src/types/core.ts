@@ -212,7 +212,17 @@ export interface Topology {
   largeCluster?: boolean // True if cluster exceeds large cluster threshold
   hiddenKinds?: string[] // Resource kinds auto-hidden for performance
   requiresNamespaceFilter?: boolean // True if cluster is too large for all-namespace topology
+  estimatedNodes?: number // Pre-build node count estimate
+  summaryMode?: boolean // True when the pod tier was collapsed into per-workload/service counts
   crdDiscoveryStatus?: 'idle' | 'discovering' | 'ready' // CRD discovery status
+}
+
+// PodSummary is stamped onto a workload or service node's data in summary mode.
+export interface PodSummary {
+  total: number
+  healthy: number
+  degraded: number
+  unhealthy: number
 }
 
 // K8s Event (from SSE stream)

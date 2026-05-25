@@ -957,6 +957,7 @@ function AppInner() {
     })
 
     return {
+      ...displayedTopology,
       nodes: filteredNodes,
       edges: filteredEdges,
     }

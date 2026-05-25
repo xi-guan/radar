@@ -15,6 +15,7 @@ import (
 	"github.com/skyhook-io/radar/internal/traffic"
 	"github.com/skyhook-io/radar/internal/version"
 	"github.com/skyhook-io/radar/pkg/k8score"
+	"github.com/skyhook-io/radar/pkg/perfstats"
 )
 
 // DiagConfig holds sanitized configuration for the diagnostics endpoint.
@@ -54,6 +55,7 @@ type DiagnosticsSnapshot struct {
 	Permissions         *DiagPermissions             `json:"permissions,omitempty"`
 	APIDiscovery        *DiagAPIDiscovery            `json:"apiDiscovery,omitempty"`
 	SSE                 *DiagSSE                     `json:"sse,omitempty"`
+	Perf                *perfstats.Snapshot          `json:"perf,omitempty"`
 	Runtime             *DiagRuntime                 `json:"runtime,omitempty"`
 	Config              *DiagConfig                  `json:"config,omitempty"`
 	RecentErrors        []errorlog.ErrorEntry        `json:"recentErrors,omitempty"`
@@ -470,6 +472,14 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		snap.SSE = &DiagSSE{
 			ConnectedClients: s.broadcaster.ClientCount(),
 		}
+	})
+
+	// Perf — always-on counters + sample windows for topology build/SSE
+	// behavior at scale. Cheap to collect (atomic loads + copy of a
+	// 100-entry ring buffer per metric).
+	collectSafe("perf", &errs, func() {
+		perf := perfstats.GetSnapshot()
+		snap.Perf = &perf
 	})
 
 	// Runtime
