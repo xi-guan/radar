@@ -11,6 +11,7 @@ import {
   List,
   Loader2,
   RefreshCw,
+  RotateCcw,
   Search,
   Tag,
   Trash2,
@@ -153,6 +154,18 @@ export interface GitOpsTableViewProps {
   // detected" copy. Hub passes "No GitOps resources across the fleet".
   emptyStateTitle?: string
   emptyStateBody?: string
+  /**
+   * Global namespace pick from the host's NamespaceSwitcher. Used to
+   * surface "viewing in namespace: X" context and to power the Clear
+   * filters affordance when no rows match. Host owns the state; shared
+   * component is read-only.
+   */
+  globalNamespaces?: string[]
+  /**
+   * Resets the global namespace pick. When wired, the "Clear filters"
+   * button drops it alongside view-local filter state.
+   */
+  onClearNamespaces?: () => void
 }
 
 // ----- Main component --------------------------------------------------------
@@ -172,6 +185,8 @@ export function GitOpsTableView({
   searchHotkey,
   emptyStateTitle,
   emptyStateBody,
+  globalNamespaces,
+  onClearNamespaces,
 }: GitOpsTableViewProps) {
   const searchInputRef = useRef<HTMLInputElement>(null)
   const [mode, setMode] = useState<GitOpsMode>('applications')
@@ -187,6 +202,34 @@ export function GitOpsTableView({
   const [automationFilter, setAutomationFilter] = useState<'all' | 'auto' | 'manual' | 'suspended'>('all')
   const [lifecycleFilter, setLifecycleFilter] = useState<'all' | 'terminating' | 'active'>('all')
   const [sortKey, setSortKey] = useState<SortKey>('health')
+
+  const hasLocalFilters =
+    !!search ||
+    syncFilters.size > 0 ||
+    healthFilters.size > 0 ||
+    projectFilters.size > 0 ||
+    namespaceFilters.size > 0 ||
+    labelFilters.size > 0 ||
+    automationFilter !== 'all' ||
+    lifecycleFilter !== 'all'
+  const hasGlobalNamespaceFilter = !!onClearNamespaces && (globalNamespaces?.length ?? 0) > 0
+  const hasAnyFilter = hasLocalFilters || hasGlobalNamespaceFilter
+
+  const clearLocalFilters = () => {
+    setSearch('')
+    setSyncFilters(new Set())
+    setHealthFilters(new Set())
+    setProjectFilters(new Set())
+    setNamespaceFilters(new Set())
+    setLabelFilters(new Set())
+    setAutomationFilter('all')
+    setLifecycleFilter('all')
+  }
+
+  const clearAllFilters = () => {
+    clearLocalFilters()
+    onClearNamespaces?.()
+  }
 
   // Optional '/' keyboard shortcut to focus search. Avoided as a default to
   // not collide with other surfaces' keyboard maps; OSS opts in via prop.
@@ -278,7 +321,11 @@ export function GitOpsTableView({
   const terminatingCount = useMemo(() => allRows.filter((row) => row.terminating).length, [allRows])
 
   // Empty-state — when there's truly nothing to show across all kinds.
-  if (totalGitOps === 0 && !loading) {
+  // `counts` is server-filtered by the global namespace pick, so a
+  // namespace-scoped zero is NOT the same as cluster-empty. Fall through
+  // to the actionable empty state below when the host owns a namespace
+  // pick we can clear; otherwise the user lands here with no escape hatch.
+  if (totalGitOps === 0 && !loading && !hasGlobalNamespaceFilter) {
     return (
       <div className="flex h-full min-h-0 flex-1 items-center justify-center bg-theme-base p-4">
         <div className="rounded-lg border border-theme-border bg-theme-surface p-8 text-center">
@@ -319,16 +366,7 @@ export function GitOpsTableView({
         namespaces={rowNamespaces}
         namespaceFilters={namespaceFilters}
         onToggleNamespace={(value) => toggleSet(namespaceFilters, setNamespaceFilters, value)}
-        onClear={() => {
-          setSearch('')
-          setSyncFilters(new Set())
-          setHealthFilters(new Set())
-          setProjectFilters(new Set())
-          setNamespaceFilters(new Set())
-          setLabelFilters(new Set())
-          setAutomationFilter('all')
-          setLifecycleFilter('all')
-        }}
+        onClear={clearAllFilters}
       />
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -426,6 +464,18 @@ export function GitOpsTableView({
                 ))}
               </div>
             )}
+            {hasAnyFilter && (
+              <Tooltip content={hasGlobalNamespaceFilter ? 'Reset all filters and the active namespace' : 'Reset all filters'}>
+                <button
+                  type="button"
+                  onClick={clearAllFilters}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-md border border-theme-border bg-theme-base px-2.5 text-xs text-theme-text-secondary hover:bg-theme-hover hover:text-theme-text-primary"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Clear filters
+                </button>
+              </Tooltip>
+            )}
             <div className="flex shrink-0 items-center gap-0 overflow-hidden rounded-md border border-theme-border">
               <GitOpsIconToggle active={viewMode === 'table'} label="Table view" icon={List} onClick={() => setViewMode('table')} />
               <GitOpsIconToggle active={viewMode === 'tiles'} label="Tiles view" icon={LayoutGrid} onClick={() => setViewMode('tiles')} />
@@ -456,8 +506,23 @@ export function GitOpsTableView({
           ) : error ? (
             <div className="p-4 text-sm text-red-500">Failed to load GitOps applications: {error.message}</div>
           ) : filteredRows.length === 0 ? (
-            <div className="flex h-full items-center justify-center text-sm text-theme-text-secondary">
-              No applications match the current filters.
+            <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-theme-text-secondary">
+              <p>{allRows.length === 0 && !hasGlobalNamespaceFilter ? 'No applications found.' : 'No applications match the current filters.'}</p>
+              {hasGlobalNamespaceFilter && globalNamespaces && (
+                <p className="text-xs text-theme-text-tertiary">
+                  Viewing {globalNamespaces.length === 1 ? `namespace: ${globalNamespaces[0]}` : `${globalNamespaces.length} namespaces`}
+                </p>
+              )}
+              {(hasGlobalNamespaceFilter || (allRows.length > 0 && hasLocalFilters)) && (
+                <button
+                  type="button"
+                  onClick={clearAllFilters}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-theme-elevated px-3 py-1.5 text-sm text-theme-text-secondary transition-colors hover:bg-theme-border hover:text-theme-text-primary"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Clear filters
+                </button>
+              )}
             </div>
           ) : viewMode === 'tiles' ? (
             <GitOpsTiles rows={filteredRows} onOpen={onRowClick} />

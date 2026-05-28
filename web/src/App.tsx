@@ -769,6 +769,25 @@ function AppInner() {
   // lists) stay in lockstep with the picker. The dedicated URL-write effect
   // below propagates the mirrored state to `?namespaces=`.
   const setActiveNamespace = useSetActiveNamespace()
+  // Defer the state flip to onSuccess. Setting namespaces to [] before the
+  // server-side pref has actually been cleared makes React Query refetch
+  // under the new empty key while the server still returns the previous
+  // pick's scope, caching stale data under the new key with no later
+  // invalidation. onSettled would do the same on errors, leaving the UI
+  // showing "All namespaces" while data is still namespace-scoped — onSuccess
+  // keeps state aligned with the server.
+  //
+  // Don't touch the URL here either: setSearchParams on a still-set state
+  // trips the URL→state sync into firing setNamespaces([]) and a duplicate
+  // mutation immediately, which re-introduces the same race. The state→URL
+  // effect propagates state=[] → URL on its own after onSuccess flips state.
+  const clearAllNamespaces = useCallback(() => {
+    if (namespaces.length === 0) return
+    setActiveNamespace.mutate(
+      { namespaces: [] },
+      { onSuccess: () => setNamespaces([]) },
+    )
+  }, [namespaces.length, setActiveNamespace])
   const initialBookmarkReconciledRef = useRef(false)
   const scopeActives = useMemo(() => namespaceScope?.actives ?? [], [namespaceScope?.actives])
   const namespaceScopeKey = useMemo(() => namespaceScope ? [...scopeActives].sort().join(',') : null, [namespaceScope, scopeActives])
@@ -1490,6 +1509,7 @@ function AppInner() {
             onResourceClick={(res) => res ? navigateToResource(res) : setSelectedResource(null)}
             onResourceClickYaml={(res) => navigateToResource(res, 'yaml')}
             onKindChange={() => setSelectedResource(null)}
+            onClearNamespaces={clearAllNamespaces}
           />
         )}
 
@@ -1538,6 +1558,7 @@ function AppInner() {
             onOpenResource={(resource) => {
               setSelectedResource(resource)
             }}
+            onClearNamespaces={clearAllNamespaces}
           />
         )}
 

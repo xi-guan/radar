@@ -86,17 +86,18 @@ interface ResourceCountsResponse {
 interface GitOpsViewProps {
   namespaces: string[]
   onOpenResource: (resource: SelectedResource) => void
+  onClearNamespaces?: () => void
 }
 
-export function GitOpsView({ namespaces, onOpenResource }: GitOpsViewProps) {
+export function GitOpsView({ namespaces, onOpenResource, onClearNamespaces }: GitOpsViewProps) {
   const location = useLocation()
   if (location.pathname.startsWith('/gitops/detail/')) {
     return <GitOpsDetailView namespaces={namespaces} onOpenResource={onOpenResource} />
   }
-  return <GitOpsTableView namespaces={namespaces} />
+  return <GitOpsTableView namespaces={namespaces} onClearNamespaces={onClearNamespaces} />
 }
 
-function GitOpsTableView({ namespaces }: { namespaces: string[] }) {
+function GitOpsTableView({ namespaces, onClearNamespaces }: { namespaces: string[]; onClearNamespaces?: () => void }) {
   const navigate = useNavigate()
   const namespacesParam = namespaces.join(',')
   const { data: apiResources, isLoading: apiResourcesLoading } = useAPIResources()
@@ -170,6 +171,8 @@ function GitOpsTableView({ namespaces }: { namespaces: string[] }) {
         navigate({ pathname: gitOpsDetailPath(row.kindName, ns, row.name), search: params.toString() })
       }}
       searchHotkey
+      globalNamespaces={namespaces}
+      onClearNamespaces={onClearNamespaces}
     />
   )
 }
