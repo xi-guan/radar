@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ChevronRight, CircleCheck, Clock, ExternalLink } from 'lucide-react';
 import { ClusterName, EmptyState } from '../ui';
 import { formatCompactAge, formatRelativeAgeTime } from '../../utils/format';
@@ -108,9 +108,24 @@ function IssueRow({
   const cluster = clusterLabel?.(issue);
   const affected = affectedSummary(issue.affected);
   const { headline } = issueMessageParts(issue);
+  const [renderDetails, setRenderDetails] = useState(open);
+
+  useEffect(() => {
+    if (open) {
+      setRenderDetails(true);
+      return;
+    }
+    if (!renderDetails) return;
+
+    const timeout = window.setTimeout(() => setRenderDetails(false), 200);
+    return () => window.clearTimeout(timeout);
+  }, [open, renderDetails]);
 
   return (
-    <li className="overflow-hidden rounded-xl border border-theme-border bg-theme-surface shadow-theme-sm">
+    <li
+      className="overflow-hidden rounded-xl border border-theme-border bg-theme-surface shadow-theme-sm"
+      style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 72px' }}
+    >
       {/* The whole header is the single toggle target — chevron is just the
           open/closed indicator, not a separate action. Deep-links live in the
           expanded body (a link nested in a button would be invalid). */}
@@ -187,20 +202,27 @@ function IssueRow({
         </span>
       </div>
 
-      <div className="grid transition-[grid-template-rows] duration-200 ease-out" style={{ gridTemplateRows: open ? '1fr' : '0fr' }}>
-        {/* Kept mounted (not `open &&`) so the grid-rows transition animates the
-            collapse too; inert when closed so SR + tab skip the clipped content. */}
-        <div className="overflow-hidden" inert={!open || undefined}>
-          <div className="border-t border-theme-border bg-theme-base/40 px-4 py-4 pl-11">
-            <div className="flex flex-col gap-4">
-              <Diagnosis issue={issue} />
-              <div className="border-t border-theme-border/70 pt-3">
-                <AffectedResources issue={issue} resourceHref={resourceHref} onResourceClick={onResourceClick} />
+      {renderDetails ? (
+        <div
+          className={`issue-details-motion ${open ? 'issue-details-motion-open' : ''}`}
+          onTransitionEnd={(event) => {
+            if (event.target !== event.currentTarget) return;
+            if (event.propertyName !== 'grid-template-rows') return;
+            if (!open) setRenderDetails(false);
+          }}
+        >
+          <div className="overflow-hidden">
+            <div className="border-t border-theme-border bg-theme-base/40 px-4 py-4 pl-11">
+              <div className="flex flex-col gap-4">
+                <Diagnosis issue={issue} />
+                <div className="border-t border-theme-border/70 pt-3">
+                  <AffectedResources issue={issue} resourceHref={resourceHref} onResourceClick={onResourceClick} />
+                </div>
               </div>
             </div>
           </div>
         </div>
-      </div>
+      ) : null}
     </li>
   );
 }

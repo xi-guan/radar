@@ -126,6 +126,25 @@
     padding: 0.75rem;
   }
 
+  /* ── ISSUE ROW DETAILS ── */
+
+  .issue-details-motion {
+    display: grid;
+    grid-template-rows: 0fr;
+    overflow: hidden;
+    transition: grid-template-rows 200ms ease-out;
+  }
+
+  .issue-details-motion-open {
+    grid-template-rows: 1fr;
+  }
+
+  @starting-style {
+    .issue-details-motion-open {
+      grid-template-rows: 0fr;
+    }
+  }
+
   /* ── SUBTLE BORDERS ── */
 
   .table-divide-subtle > * + * {
