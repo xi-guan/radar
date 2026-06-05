@@ -24,6 +24,7 @@ import {
   Plus,
   GitCompare,
   Regex,
+  ListChecks,
 } from 'lucide-react'
 import { clsx } from 'clsx'
 import { ResourceBar } from '../ui/ResourceBar'
@@ -154,6 +155,7 @@ import { useRegisterShortcut, useRegisterShortcuts } from '../../hooks/useKeyboa
 import { ResourcesSidebar } from './ResourcesSidebar'
 import type { SelectedKindInfo } from './ResourcesSidebar'
 import { CompareTray, togglePick, pickIndex, refToParam, SIDE_TONES, type CompareTrayPick, type NamespacedRef } from '../compare'
+import { ConfirmDialog } from '../ui/ConfirmDialog'
 
 // Pod problem filter options (special multi-select, not a single column value)
 const POD_PROBLEMS = ['CrashLoopBackOff', 'ImagePullBackOff', 'OOMKilled', 'Unschedulable', 'Not Ready', 'High Restarts', 'Init Failed', 'Exit Code Error', 'Failed', 'Other'] as const
@@ -1805,6 +1807,9 @@ interface ResourcesViewProps {
    * the switcher lives outside this component and may persist server-side.
    */
   onClearNamespaces?: () => void
+  // Bulk operations
+  onBulkDelete?: (items: Array<{ kind: string; namespace: string; name: string }>, options?: { force?: boolean; onSuccess?: () => void }) => void
+  isBulkDeleting?: boolean
 }
 
 // Default selected kind
@@ -1953,6 +1958,8 @@ export function ResourcesView({
   onCompareSubmit,
   resolveRowCluster,
   onClearNamespaces,
+  onBulkDelete,
+  isBulkDeleting = false,
 }: ResourcesViewProps) {
   const initialFilters = getInitialFiltersFromURL()
   const [selectedKind, setSelectedKind] = useState<SelectedKindInfo>(() => getInitialKindFromURL(basePath, defaultKind, locationPathname, locationSearch))
@@ -1970,6 +1977,8 @@ export function ResourcesView({
   // Notify parent of selected kind changes (including initial mount)
   useEffect(() => {
     onSelectedKindChange?.(selectedKind)
+    setBulkMode(false)
+    setCheckedResources(new Set())
   }, [selectedKind.name, selectedKind.group]) // eslint-disable-line react-hooks/exhaustive-deps
   const [searchTerm, setSearchTerm] = useState(initialFilters.search)
   const [regexMode, setRegexMode] = useState(false)
@@ -1998,6 +2007,19 @@ export function ResourcesView({
   const [labelSelector, setLabelSelector] = useState<string>(initialFilters.labelSelector)
   const [ownerKind, setOwnerKind] = useState<string>(initialFilters.ownerKind)
   const [ownerName, setOwnerName] = useState<string>(initialFilters.ownerName)
+
+  // Multi-select state for bulk operations. Checkboxes only render while
+  // bulk mode is active — entered via the toolbar toggle — so the risky
+  // bulk-delete surface stays out of the way during normal browsing.
+  const [bulkMode, setBulkMode] = useState(false)
+  const [checkedResources, setCheckedResources] = useState<Set<string>>(new Set())
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false)
+  const [bulkForceDelete, setBulkForceDelete] = useState(false)
+
+  const exitBulkMode = useCallback(() => {
+    setBulkMode(false)
+    setCheckedResources(new Set())
+  }, [])
 
   // Column filter helpers
   const clearColumnFilter = useCallback((key: string) => {
@@ -2510,6 +2532,7 @@ export function ResourcesView({
         if (showProblemsDropdown) { setShowProblemsDropdown(false); return }
         if (showLabelsDropdown) { setShowLabelsDropdown(false); return }
         if (compareMode) { exitCompareMode(); return }
+        if (bulkMode) { exitBulkMode(); return }
         if (highlightedIndex >= 0) setHighlightedIndex(-1)
         else searchInputRef.current?.blur()
       },
@@ -3378,6 +3401,35 @@ export function ResourcesView({
     flatKindListRef.current = list
   }, [pinned, categories])
 
+  // Multi-select helpers
+  const getResourceKey = useCallback((resource: any) => {
+    return resource.metadata?.uid || `${resource.metadata?.namespace || ''}/${resource.metadata?.name || ''}`
+  }, [])
+
+  const toggleChecked = useCallback((resource: any) => {
+    const key = getResourceKey(resource)
+    setCheckedResources(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [getResourceKey])
+
+  const toggleCheckAll = useCallback(() => {
+    setCheckedResources(prev => {
+      if (prev.size > 0 && prev.size === filteredResources.length) return new Set()
+      return new Set(filteredResources.map(getResourceKey))
+    })
+  }, [filteredResources, getResourceKey])
+
+  const checkedItems = useMemo(() => {
+    if (checkedResources.size === 0) return []
+    return filteredResources.filter(r => checkedResources.has(getResourceKey(r)))
+  }, [filteredResources, checkedResources, getResourceKey])
+
+  const isCheckboxMode = onBulkDelete != null && bulkMode
+
   // Filter columns by visibility
   const columns = useMemo(() => {
     if (visibleColumns.size === 0) return allColumns.filter(c => c.defaultVisible !== false)
@@ -3415,6 +3467,7 @@ export function ResourcesView({
               — typically blowing this narrow column out to ~200px.
             */}
             {compareMode && <col style={{ width: COMPARE_COLUMN_WIDTH }} />}
+            {isCheckboxMode && <col style={{ width: '40px' }} />}
             {columns.map(col => (
               <col
                 key={col.key}
@@ -3432,7 +3485,7 @@ export function ResourcesView({
       )
     }),
     TableRow: VirtuosoTableRow,
-  }), [columns, columnWidths, hasResizedColumns, compareMode, tableMinWidth])
+  }), [columns, columnWidths, hasResizedColumns, compareMode, tableMinWidth, isCheckboxMode])
 
   // Calculate filter options with counts based on current resources (before filtering)
   const filterOptions = useMemo(() => {
@@ -3961,7 +4014,11 @@ export function ResourcesView({
           {compareEnabled && (
             <Tooltip content={compareMode ? 'Exit compare mode' : 'Compare two resources side-by-side'}>
               <button
-                onClick={() => (compareMode ? exitCompareMode() : setCompareMode(true))}
+                onClick={() => {
+                  if (compareMode) { exitCompareMode(); return }
+                  exitBulkMode()
+                  setCompareMode(true)
+                }}
                 aria-pressed={compareMode}
                 className={clsx(
                   'p-2 rounded-lg transition-colors',
@@ -3974,7 +4031,50 @@ export function ResourcesView({
               </button>
             </Tooltip>
           )}
+          {onBulkDelete && (
+            <Tooltip content={bulkMode ? 'Exit bulk select mode' : 'Select multiple resources'}>
+              <button
+                onClick={() => {
+                  if (bulkMode) { exitBulkMode(); return }
+                  exitCompareMode()
+                  setBulkMode(true)
+                }}
+                aria-pressed={bulkMode}
+                className={clsx(
+                  'p-2 rounded-lg transition-colors',
+                  bulkMode
+                    ? 'bg-skyhook-500/15 text-skyhook-300 border border-skyhook-400/50'
+                    : 'text-theme-text-secondary hover:text-theme-text-primary hover:bg-theme-elevated',
+                )}
+              >
+                <ListChecks className="w-4 h-4" />
+              </button>
+            </Tooltip>
+          )}
         </div>
+
+        {/* Bulk actions bar */}
+        {isCheckboxMode && (
+          <div className="flex items-center gap-3 px-4 py-2 bg-skyhook-500/10 border-b border-skyhook-400/20 shrink-0">
+            <span className="text-sm font-medium text-theme-text-primary">
+              {checkedResources.size} selected
+            </span>
+            <button
+              onClick={() => setShowBulkDeleteConfirm(true)}
+              disabled={checkedResources.size === 0}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:pointer-events-none text-white rounded-lg transition-colors"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete
+            </button>
+            <button
+              onClick={exitBulkMode}
+              className="px-3 py-1.5 text-xs text-theme-text-secondary hover:text-theme-text-primary hover:bg-theme-elevated rounded-lg transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
 
         {/* Table */}
         <div
@@ -4079,6 +4179,18 @@ export function ResourcesView({
                       title="Compare mode"
                     >
                       <GitCompare className="w-3.5 h-3.5 inline-block opacity-70" />
+                    </th>
+                  )}
+                  {isCheckboxMode && (
+                    <th className="bg-theme-surface border-b border-theme-border w-10 text-center px-0 py-3">
+                      <input
+                        type="checkbox"
+                        checked={filteredResources.length > 0 && checkedResources.size === filteredResources.length}
+                        ref={(el) => { if (el) el.indeterminate = checkedResources.size > 0 && checkedResources.size < filteredResources.length }}
+                        onChange={toggleCheckAll}
+                        className="w-3.5 h-3.5 rounded border-theme-border accent-skyhook-500 cursor-pointer"
+                        title={checkedResources.size > 0 ? 'Deselect all' : 'Select all'}
+                      />
                     </th>
                   )}
                   {columns.map((col, colIdx) => {
@@ -4259,6 +4371,7 @@ export function ResourcesView({
                       clusterId: resolveRowCluster?.(resource)?.id,
                     })
                   : -1
+                const resourceKey = getResourceKey(resource)
                 return (
                   <ResourceRowCells
                     resource={resource}
@@ -4269,12 +4382,15 @@ export function ResourcesView({
                     hasSpacerColumn={hasResizedColumns}
                     isSelected={isSelected}
                     isHighlighted={isHighlighted}
+                    isChecked={checkedResources.has(resourceKey)}
+                    showCheckbox={isCheckboxMode}
                     majorityNodeMinorVersion={majorityNodeMinorVersion}
-                    onClick={() => compareMode ? toggleComparePick(resource) : selectResource(resource, isSelected)}
+                    onClick={() => compareMode ? toggleComparePick(resource) : isCheckboxMode ? toggleChecked(resource) : selectResource(resource, isSelected)}
                     onMouseEnter={() => setHighlightedIndex(-1)}
                     compareMode={compareMode}
                     comparePickIndex={pickIdx}
                     rowHref={rowHrefFor?.(resource)}
+                    onCheckToggle={() => toggleChecked(resource)}
                   />
                 )
               }}
@@ -4301,6 +4417,44 @@ export function ResourcesView({
         )}
       </div>
     </div>
+
+    {/* Bulk delete confirmation */}
+    <ConfirmDialog
+      open={showBulkDeleteConfirm}
+      onClose={() => { setShowBulkDeleteConfirm(false); setBulkForceDelete(false) }}
+      onConfirm={() => {
+        const items = checkedItems.map(r => ({
+          kind: selectedKind.name,
+          namespace: r.metadata?.namespace || '',
+          name: r.metadata?.name || '',
+        }))
+        onBulkDelete?.(items, {
+          force: bulkForceDelete,
+          onSuccess: () => {
+            exitBulkMode()
+            setShowBulkDeleteConfirm(false)
+            setBulkForceDelete(false)
+          },
+        })
+      }}
+      title={`Delete ${checkedItems.length} ${selectedKind.kind}${checkedItems.length > 1 ? 's' : ''}?`}
+      message={`You are about to delete ${checkedItems.length} resource${checkedItems.length > 1 ? 's' : ''}. This action cannot be undone.`}
+      details={checkedItems.map(r => `${r.metadata?.namespace ? r.metadata.namespace + '/' : ''}${r.metadata?.name}`).join('\n')}
+      confirmLabel={bulkForceDelete ? `Force Delete ${checkedItems.length} resource${checkedItems.length > 1 ? 's' : ''}` : `Delete ${checkedItems.length} resource${checkedItems.length > 1 ? 's' : ''}`}
+      variant="danger"
+      isLoading={isBulkDeleting}
+      isClosable
+    >
+      <label className="flex items-center gap-2 text-sm text-theme-text-secondary">
+        <input
+          type="checkbox"
+          checked={bulkForceDelete}
+          onChange={(e) => setBulkForceDelete(e.target.checked)}
+          className="w-4 h-4 rounded border-theme-border bg-theme-base text-red-600 focus:ring-red-500 focus:ring-offset-0"
+        />
+        <span>Force delete (strips finalizers and bypasses grace period)</span>
+      </label>
+    </ConfirmDialog>
     </ResourcesViewDataContext.Provider>
   )
 }
@@ -4314,6 +4468,8 @@ interface ResourceRowCellsProps {
   hasSpacerColumn: boolean
   isSelected?: boolean
   isHighlighted?: boolean
+  isChecked?: boolean
+  showCheckbox?: boolean
   majorityNodeMinorVersion?: string
   onClick?: () => void
   onMouseEnter?: () => void
@@ -4324,6 +4480,7 @@ interface ResourceRowCellsProps {
    *  data cells drop their click handlers. The compare-mode chip column
    *  is unaffected (still toggles picks). */
   rowHref?: string
+  onCheckToggle?: () => void
 }
 
 function rowHighlightClass(
@@ -4331,6 +4488,7 @@ function rowHighlightClass(
   comparePickIndex: number,
   isSelected: boolean | undefined,
   isHighlighted: boolean | undefined,
+  isChecked?: boolean,
 ): string {
   if (compareMode) {
     if (comparePickIndex === 0) return `${SIDE_TONES.a.rowBg} ${SIDE_TONES.a.rowBgHover}`
@@ -4339,12 +4497,13 @@ function rowHighlightClass(
     return 'group-hover/row:bg-theme-surface/50'
   }
   if (isSelected) return 'selection-strong group-hover/row:bg-skyhook-500/30'
+  if (isChecked) return 'selection group-hover/row:bg-skyhook-500/20'
   if (isHighlighted) return 'selection selection-ring'
   return 'group-hover/row:bg-theme-surface/50'
 }
 
-function ResourceRowCells({ resource, kind, group, columns, extraColumnsByKey, hasSpacerColumn, isSelected, isHighlighted, majorityNodeMinorVersion, onClick, onMouseEnter, compareMode, comparePickIndex = -1, rowHref }: ResourceRowCellsProps) {
-  const rowHighlight = rowHighlightClass(compareMode, comparePickIndex, isSelected, isHighlighted)
+function ResourceRowCells({ resource, kind, group, columns, extraColumnsByKey, hasSpacerColumn, isSelected, isHighlighted, isChecked, showCheckbox, majorityNodeMinorVersion, onClick, onMouseEnter, compareMode, comparePickIndex = -1, rowHref, onCheckToggle }: ResourceRowCellsProps) {
+  const rowHighlight = rowHighlightClass(compareMode, comparePickIndex, isSelected, isHighlighted, isChecked)
   const pickedSide = comparePickIndex === 0 ? 'a' : comparePickIndex === 1 ? 'b' : null
   // When the host supplies an anchor, drop per-cell onClick for the data
   // columns: the anchor is the only navigation surface. The compare-mode
@@ -4375,6 +4534,19 @@ function ResourceRowCells({ resource, kind, group, columns, extraColumnsByKey, h
               aria-hidden
             />
           )}
+        </td>
+      )}
+      {showCheckbox && (
+        <td
+          className={clsx('border-b-subtle text-center px-0 py-3 w-10 cursor-pointer transition-colors', rowHighlight)}
+          onClick={(e) => { e.stopPropagation(); onCheckToggle?.() }}
+        >
+          <input
+            type="checkbox"
+            checked={!!isChecked}
+            onChange={() => {}}
+            className="w-3.5 h-3.5 rounded border-theme-border accent-skyhook-500 cursor-pointer"
+          />
         </td>
       )}
       {columns.map((col) => (

@@ -1725,6 +1725,41 @@ export function useDeleteResource() {
   })
 }
 
+export function useBulkDeleteResources() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({ items, force }: { items: Array<{ kind: string; namespace: string; name: string }>; force?: boolean }) => {
+      const results = await Promise.allSettled(
+        items.map(async ({ kind, namespace, name }) => {
+          const url = new URL(`${getApiBase()}/resources/${kind}/${namespace}/${name}`, window.location.origin)
+          if (force) url.searchParams.set('force', 'true')
+          const response = await apiFetch(url.toString(), { method: 'DELETE' })
+          if (!response.ok) {
+            const error = await response.json().catch(() => ({ error: 'Unknown error' }))
+            throw new Error(error.error || `Failed to delete ${namespace}/${name}`)
+          }
+          return { kind, namespace, name }
+        })
+      )
+      const failed = results.filter(r => r.status === 'rejected')
+      if (failed.length > 0) {
+        throw new Error(`Failed to delete ${failed.length} of ${items.length} resources`)
+      }
+      return { deleted: items.length }
+    },
+    meta: {
+      errorMessage: 'Failed to delete some resources',
+      successMessage: 'Resources deleted',
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['resources'] })
+      queryClient.invalidateQueries({ queryKey: ['resource-counts'] })
+      queryClient.invalidateQueries({ queryKey: ['topology'] })
+    },
+  })
+}
+
 // Apply (create or update) a resource from YAML
 export interface ApplyResourceResult {
   name: string
