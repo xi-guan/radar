@@ -6,7 +6,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useLocation, useSearchParams, useNavigationType, NavigationType } from 'react-router-dom'
 import { HomeView } from './components/home/HomeView'
 import { DebugOverlay } from './components/DebugOverlay'
-import { TopologyGraph, TopologySearch, TopologyFilterSidebar, TopologyControls, gitOpsRouteForKind } from '@skyhook-io/k8s-ui'
+import { TopologyGraph, TopologySearch, TopologyFilterSidebar, TopologyControls, gitOpsRouteForKind, gitOpsRouteForResource } from '@skyhook-io/k8s-ui'
 import { TimelineView } from './components/timeline/TimelineView'
 import { ResourcesView } from './components/resources/ResourcesView'
 import { serializeColumnFilters } from './components/resources/resource-utils'
@@ -415,6 +415,23 @@ function AppInner() {
     }
     navigate({ pathname: `/resources/${pluralKind}`, search: newParams.toString() })
   }, [searchParams, navigate])
+
+  // From the Issues queue: a GitOps reconciler subject (Argo Application / Flux
+  // Kustomization / HelmRelease) routes to its rich detail page (tree + insights
+  // + ops), not the generic resource drawer that's a dead-end for it. Member
+  // resources (Pods, Services, …) fall through to the standard resource view.
+  const navigateFromIssue = useCallback((resource: SelectedResource) => {
+    const gitOpsPath = gitOpsRouteForResource({
+      apiVersion: resource.group ? `${resource.group}/v1` : 'v1',
+      kind: resource.kind,
+      metadata: { namespace: resource.namespace ?? '', name: resource.name },
+    })
+    if (gitOpsPath) {
+      navigate(gitOpsPath)
+      return
+    }
+    navigateToResourceList(resource)
+  }, [navigate, navigateToResourceList])
 
   // Collapse from expanded WorkloadView back to drawer
   const handleCollapseFromExpanded = useCallback(() => {
@@ -1667,12 +1684,13 @@ function AppInner() {
 
         {/* Issues — per-cluster live triage queue (hidden route: not yet in the
             nav `views` list; reachable at /issues). Same shared <IssuesView> the
-            Hub fleet uses; resource clicks open the standard resource drawer. */}
+            Hub fleet uses; a GitOps reconciler subject routes to its detail page,
+            other resources open the standard resource view. */}
         {mainView === 'issues' && (
           <IssuesPane
             namespaces={namespaces}
             onBack={() => setMainView('home')}
-            onNavigateToResource={navigateToResourceList}
+            onNavigateToResource={navigateFromIssue}
           />
         )}
 
