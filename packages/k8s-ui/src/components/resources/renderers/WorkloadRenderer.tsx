@@ -4,14 +4,23 @@ import { clsx } from 'clsx'
 import { Section, PropertyList, Property, ConditionsSection, PodTemplateSection, AlertBanner, ResourceLink, ResourceRefBadge } from '../../ui/drawer-components'
 import { DialogPortal } from '../../ui/DialogPortal'
 import { Tooltip } from '../../ui/Tooltip'
-import type { RBACSubjectResponse, RBACPolicyRule, ResourceRef } from '../../../types'
+import { Badge, type BadgeSeverity } from '../../ui/Badge'
+import type { RBACSubjectResponse, RBACPolicyRule, ResourceRef, HPADiagnosis } from '../../../types'
 import { detectBlastRadius, rulePermissivenessScore } from '../../../utils/rbac-blast-radius'
 import { RBACErrorSection, isRBACUnavailable } from './RBACErrorSection'
+import { hpaStateLabel, hpaStateLevel } from '../resource-utils-hpa'
 import {
   rbacVerbBadgeClass,
   rbacResourceBadgeClass,
   rbacApiGroupBadgeClass,
 } from '../../../utils/rbac-badges'
+
+export interface ScalerDiagnosis {
+  ref: ResourceRef
+  diagnosis?: HPADiagnosis
+  loading?: boolean
+  error?: string
+}
 
 interface WorkloadRendererProps {
   kind: string
@@ -21,6 +30,7 @@ interface WorkloadRendererProps {
   onScale?: (replicas: number) => Promise<void>
   isScalePending?: boolean
   scaleBlockedBy?: ResourceRef[]
+  scalerDiagnostics?: ScalerDiagnosis[]
   onRequestRefresh?: () => void
   /**
    * RBAC reverse-lookup for the workload's pod-template ServiceAccount.
@@ -110,7 +120,27 @@ function formatScalerLabel(ref: ResourceRef): string {
   return `${ref.kind} ${prefix}${ref.name}`
 }
 
-export function WorkloadRenderer({ kind, data, onNavigate, onViewPods, onScale, isScalePending, scaleBlockedBy, onRequestRefresh, rbacData, rbacLoading, rbacError }: WorkloadRendererProps) {
+function compactHPASummary(diagnosis: HPADiagnosis): string {
+  if (diagnosis.state === 'limited_max') {
+    return `Wants more; capped at maxReplicas=${diagnosis.bounds.max}`
+  }
+  if (diagnosis.state === 'pinned') {
+    return `Fixed at ${diagnosis.bounds.current} replicas`
+  }
+  if (diagnosis.state === 'metrics_unavailable' || diagnosis.state === 'metrics_incomplete') {
+    const missingMetric = diagnosis.metrics?.find((metric) => metric.status !== 'ok')
+    if (missingMetric?.type === 'Resource' && missingMetric.name) {
+      return `Add ${missingMetric.name} requests; HPA cannot compute replicas`
+    }
+    if (missingMetric?.name) {
+      return `${missingMetric.name} metric unavailable; HPA cannot compute replicas`
+    }
+    return 'Metrics unavailable; HPA cannot compute replicas'
+  }
+  return diagnosis.summary
+}
+
+export function WorkloadRenderer({ kind, data, onNavigate, onViewPods, onScale, isScalePending, scaleBlockedBy, scalerDiagnostics, onRequestRefresh, rbacData, rbacLoading, rbacError }: WorkloadRendererProps) {
   const status = data.status || {}
   const spec = data.spec || {}
   const metadata = data.metadata || {}
@@ -226,8 +256,15 @@ export function WorkloadRenderer({ kind, data, onNavigate, onViewPods, onScale, 
                   value={
                     <div className="flex flex-wrap gap-1">
                       {scaleBlockedBy.map((ref) => (
-                        <ResourceRefBadge key={`${ref.kind}/${ref.namespace}/${ref.name}`} resourceRef={ref} onClick={onNavigate} />
+                        <ResourceRefBadge key={`${ref.kind}/${ref.namespace}/${ref.name}`} resourceRef={ref} onClick={onNavigate} wrapAtSeparator />
                       ))}
+                      {scalerDiagnostics && scalerDiagnostics.length > 0 && (
+                        <div className="mt-1 w-full space-y-1">
+                          {scalerDiagnostics.map((entry) => (
+                            <ScalerDiagnosisRow key={`${entry.ref.kind}/${entry.ref.namespace}/${entry.ref.name}`} entry={entry} />
+                          ))}
+                        </div>
+                      )}
                     </div>
                   }
                 />
@@ -261,7 +298,6 @@ export function WorkloadRenderer({ kind, data, onNavigate, onViewPods, onScale, 
               <button
                 type="button"
                 disabled
-                title={scaleBlockedReason}
                 aria-label={scaleBlockedReason}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-theme-text-tertiary bg-theme-elevated border border-theme-border rounded cursor-not-allowed"
               >
@@ -382,6 +418,39 @@ export function WorkloadRenderer({ kind, data, onNavigate, onViewPods, onScale, 
       )}
     </>
   )
+}
+
+function ScalerDiagnosisRow({ entry }: { entry: ScalerDiagnosis }) {
+  if (entry.loading) {
+    return <div className="text-xs text-theme-text-tertiary">Loading autoscaler diagnosis...</div>
+  }
+  if (entry.error) {
+    return <div className="text-xs text-theme-text-tertiary">Autoscaler diagnosis unavailable</div>
+  }
+  if (!entry.diagnosis) return null
+  return (
+    <div className="rounded border border-theme-border bg-theme-surface px-2 py-1.5 text-xs leading-6 text-theme-text-secondary whitespace-normal break-normal">
+      <Badge severity={badgeSeverityForHPA(entry.diagnosis)} size="sm" className="mr-1.5 align-middle">{hpaStateLabel(entry.diagnosis.state)}</Badge>
+      <span className="align-middle whitespace-normal break-normal">{compactHPASummary(entry.diagnosis)}</span>
+    </div>
+  )
+}
+
+function badgeSeverityForHPA(diagnosis: HPADiagnosis): BadgeSeverity {
+  switch (hpaStateLevel(diagnosis.state)) {
+    case 'healthy':
+      return 'success'
+    case 'unhealthy':
+      return 'error'
+    case 'degraded':
+      return 'warning'
+    case 'alert':
+      return 'alert'
+    case 'neutral':
+      return 'info'
+    default:
+      return 'neutral'
+  }
 }
 
 // ============================================================================

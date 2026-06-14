@@ -166,7 +166,7 @@ export function Property({ label, value, copyable, onCopy, copied }: PropertyPro
   return (
     <div className="flex items-start gap-2 text-sm">
       <span className="text-theme-text-tertiary w-40 shrink-0">{label}</span>
-      <span className="text-theme-text-primary break-all flex-1">{displayValue}</span>
+      <span className={clsx('text-theme-text-primary flex-1 min-w-0', isReactElement(value) ? 'break-normal' : 'break-all')}>{displayValue}</span>
       {copyable && onCopy && !isReactElement(value) && (
         <button
           onClick={() => onCopy(strValue, labelKey)}
@@ -283,7 +283,20 @@ function isConditionHealthy(cond: { type?: string; status?: string }): boolean {
   return inverted ? cond.status === 'False' : cond.status === 'True'
 }
 
-export function ConditionsSection({ conditions }: { conditions?: any[] }) {
+export type ConditionTone = 'ok' | 'warning' | 'fail' | 'unknown'
+
+function defaultConditionTone(cond: { type?: string; status?: string }): ConditionTone {
+  if (cond.status !== 'True' && cond.status !== 'False') return 'unknown'
+  return isConditionHealthy(cond) ? 'ok' : 'fail'
+}
+
+export function ConditionsSection({
+  conditions,
+  getConditionTone,
+}: {
+  conditions?: any[]
+  getConditionTone?: (condition: any) => ConditionTone | undefined
+}) {
   if (!conditions || conditions.length === 0) return null
 
   // Sort by lastTransitionTime (most recent first), then alphabetically for ties
@@ -294,7 +307,8 @@ export function ConditionsSection({ conditions }: { conditions?: any[] }) {
     return (a.type || '').localeCompare(b.type || '')
   })
 
-  const failCount = sorted.filter((c: any) => (c.status === 'True' || c.status === 'False') && !isConditionHealthy(c)).length
+  const conditionTone = (cond: any) => getConditionTone?.(cond) ?? defaultConditionTone(cond)
+  const failCount = sorted.filter((c: any) => conditionTone(c) === 'fail').length
 
   return (
     <Section
@@ -307,13 +321,15 @@ export function ConditionsSection({ conditions }: { conditions?: any[] }) {
 
         <div className="space-y-0.5">
           {sorted.map((cond: any) => {
-            const isUnknown = cond.status !== 'True' && cond.status !== 'False'
-            const isOk = !isUnknown && isConditionHealthy(cond)
-            const isFail = !isOk && !isUnknown
+            const tone = conditionTone(cond)
+            const isOk = tone === 'ok'
+            const isWarning = tone === 'warning'
+            const isFail = tone === 'fail'
             return (
               <div key={cond.type} className={clsx(
                 'flex items-start py-1.5 pr-1 text-sm relative',
-                isFail && 'border-l-2 border-red-400/60 dark:border-red-500/40'
+                isFail && 'border-l-2 border-red-400/60 dark:border-red-500/40',
+                isWarning && 'border-l-2 border-amber-400/60 dark:border-amber-500/40'
               )}>
                 {/* Timestamp column — fixed width on the left */}
                 <div className="w-[48px] shrink-0 text-[10px] text-theme-text-tertiary text-right pr-2 pt-0.5">
@@ -323,16 +339,24 @@ export function ConditionsSection({ conditions }: { conditions?: any[] }) {
                 <span className={clsx(
                   'w-3 h-3 rounded-full flex items-center justify-center shrink-0 mt-1 z-10 ring-2 ring-theme-surface',
                   isOk ? 'bg-emerald-500/20 text-emerald-500 dark:bg-emerald-500/30'
-                    : isUnknown ? 'bg-gray-400/20 text-gray-400 dark:bg-gray-400/30'
+                    : tone === 'unknown' ? 'bg-gray-400/20 text-gray-400 dark:bg-gray-400/30'
+                    : isWarning ? 'bg-amber-500/25 text-amber-600 dark:text-amber-400 dark:bg-amber-500/35'
                     : 'bg-red-500/25 text-red-500 dark:bg-red-500/35'
                 )}>
                   {isOk ? <Check className="w-2 h-2" strokeWidth={4} />
-                    : isUnknown ? <Minus className="w-2 h-2" strokeWidth={4} />
+                    : tone === 'unknown' ? <Minus className="w-2 h-2" strokeWidth={4} />
+                    : isWarning ? <AlertTriangle className="w-2 h-2" strokeWidth={4} />
                     : <X className="w-2 h-2" strokeWidth={4} />}
                 </span>
                 {/* Content */}
                 <div className="min-w-0 flex-1 pl-2">
-                  <span className={clsx('font-medium text-[13px]', isOk ? 'text-theme-text-primary' : isUnknown ? 'text-theme-text-secondary' : 'text-red-600 dark:text-red-400')}>{cond.type}</span>
+                  <span className={clsx(
+                    'font-medium text-[13px]',
+                    isOk ? 'text-theme-text-primary'
+                      : tone === 'unknown' ? 'text-theme-text-secondary'
+                        : isWarning ? 'text-amber-600 dark:text-amber-400'
+                          : 'text-red-600 dark:text-red-400'
+                  )}>{cond.type}</span>
                   {cond.reason && cond.reason !== cond.type && (
                     <div className="text-[10px] text-theme-text-secondary">{cond.reason}</div>
                   )}
@@ -848,36 +872,50 @@ function RelationshipGroup({ label, refs, onNavigate }: RelationshipGroupProps) 
 export interface ResourceRefBadgeProps {
   resourceRef: ResourceRef
   onClick?: (ref: ResourceRef) => void
+  wrapAtSeparator?: boolean
 }
 
 /** Reusable chip/badge for showing a related resource with click-to-navigate */
-export function ResourceRefBadge({ resourceRef, onClick }: ResourceRefBadgeProps) {
+export function ResourceRefBadge({ resourceRef, onClick, wrapAtSeparator }: ResourceRefBadgeProps) {
   const kindClass = getKindColor(resourceRef.kind)
   const kindName = formatKindForRef(resourceRef.kind)
+  const content = wrapAtSeparator ? (
+    <>
+      <span className="shrink-0 opacity-60">{kindName}/</span>
+      <span className="min-w-0 max-w-full whitespace-normal break-normal text-left leading-tight">{resourceRef.name}</span>
+    </>
+  ) : (
+    <>
+      <span className="opacity-60">{kindName}/</span>
+      {resourceRef.name}
+    </>
+  )
+  const layoutClass = wrapAtSeparator
+    ? 'badge max-w-full min-w-0 flex-wrap items-center whitespace-normal text-left leading-tight'
+    : 'badge'
 
   if (onClick) {
     return (
       <button
         onClick={() => onClick(resourceRef)}
         className={clsx(
-          'badge hover:brightness-[0.92] dark:hover:brightness-125 transition-[filter]',
+          layoutClass,
+          'hover:brightness-[0.92] dark:hover:brightness-125 transition-[filter]',
           kindClass
         )}
         title={`${resourceRef.kind}: ${resourceRef.namespace}/${resourceRef.name}`}
       >
-        <span className="opacity-60">{kindName}/</span>
-        {resourceRef.name}
+        {content}
       </button>
     )
   }
 
   return (
     <span
-      className={clsx('badge', kindClass)}
+      className={clsx(layoutClass, kindClass)}
       title={`${resourceRef.kind}: ${resourceRef.namespace}/${resourceRef.name}`}
     >
-      <span className="opacity-60">{kindName}/</span>
-      {resourceRef.name}
+      {content}
     </span>
   )
 }
@@ -922,6 +960,7 @@ function formatKindForRef(kind: string): string {
     job: 'job',
     cronjob: 'cj',
     hpa: 'hpa',
+    horizontalpodautoscaler: 'hpa',
   }
   return shortNames[k] || k
 }
