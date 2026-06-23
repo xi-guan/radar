@@ -864,19 +864,58 @@ func (s *Server) resolveHelmNamespaces(r *http.Request) ([]string, bool) {
 	if noNamespaceAccess(namespaces) {
 		return nil, false
 	}
-	if namespaces == nil && auth.UserFromContext(r.Context()) == nil {
-		// "All namespaces" in no-auth mode. A namespace-restricted
-		// ServiceAccount can't list cluster-wide; resolve to the namespaces it
-		// can actually see so the Helm list degrades gracefully instead of
-		// 403-ing. Authenticated users are handled by parseNamespacesForUser
-		// above, and Helm lists impersonate them directly; narrowing them with
-		// the backend client's fallback namespaces would under-list users whose
-		// RBAC is wider than Radar's own ServiceAccount.
-		if fallback := helm.ResolveNoAuthListNamespaces(r.Context()); len(fallback) > 0 {
-			return fallback, true
+	if namespaces == nil {
+		if auth.UserFromContext(r.Context()) == nil {
+			// "All namespaces" in no-auth mode. A namespace-restricted
+			// ServiceAccount can't list cluster-wide; resolve to the namespaces
+			// it can actually see so the Helm list degrades gracefully instead
+			// of 403-ing. Authenticated users are handled below; Helm lists
+			// impersonate them directly, so narrowing them with the backend
+			// client's fallback namespaces would under-list users whose RBAC is
+			// wider than Radar's own ServiceAccount.
+			if fallback := helm.ResolveNoAuthListNamespaces(r.Context()); len(fallback) > 0 {
+				return fallback, true
+			}
+		} else if !s.canRead(r, "", "secrets", "", "list") {
+			// Authenticated user with cluster-wide pod access (parseNamespacesFor-
+			// User returned nil) but NOT cluster-wide `list secrets`. Helm storage
+			// is Secrets, so a single cluster-wide list would 403 wholesale and
+			// blank the view. Resolve to the namespaces where the user CAN list
+			// secrets — a per-namespace SAR memoized on the user's perms (2-min
+			// TTL), so repeat page loads don't re-probe. Falls through to the
+			// cluster-wide path (→ honest 403) when they can't read secrets
+			// anywhere.
+			if allowed := s.filterNamespacesByCanRead(r, "", "secrets", "list", s.allNamespaceNames()); len(allowed) > 0 {
+				return allowed, true
+			}
 		}
 	}
 	return namespaces, true
+}
+
+// allNamespaceNames returns every namespace name from the shared cache lister,
+// or nil when the namespace informer isn't available. Used as the candidate
+// pool for per-user secrets-SAR filtering — the SAR is the authorization gate,
+// so the (cluster-wide) pool only needs to be a superset of what the user can
+// read.
+func (s *Server) allNamespaceNames() []string {
+	cache := k8s.GetResourceCache()
+	if cache == nil {
+		return nil
+	}
+	lister := cache.Namespaces()
+	if lister == nil {
+		return nil
+	}
+	nsList, err := lister.List(labels.Everything())
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(nsList))
+	for _, ns := range nsList {
+		names = append(names, ns.Name)
+	}
+	return names
 }
 
 func dedupeStrings(values []string) []string {
@@ -972,12 +1011,32 @@ func (s *Server) filterNamespacesByCanRead(r *http.Request, group, resource, ver
 	if len(namespaces) == 0 {
 		return namespaces
 	}
+	// Bounded-parallel: each canRead miss is a SAR round-trip, so a serial loop
+	// over a large candidate set (e.g. a cluster-wide reader's full namespace
+	// list in resolveHelmNamespaces) would block the request for N round-trips.
+	// canRead memoizes on the mutex-guarded UserPermissions.canI, mirroring the
+	// parallel SAR probing in internal/k8s/capabilities.go. Result is sorted so
+	// the output is deterministic regardless of goroutine completion order.
+	const maxConcurrent = 16
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	out := make([]string, 0, len(namespaces))
 	for _, ns := range namespaces {
-		if s.canRead(r, group, resource, ns, verb) {
-			out = append(out, ns)
-		}
+		wg.Add(1)
+		go func(ns string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if s.canRead(r, group, resource, ns, verb) {
+				mu.Lock()
+				out = append(out, ns)
+				mu.Unlock()
+			}
+		}(ns)
 	}
+	wg.Wait()
+	sort.Strings(out)
 	return out
 }
 
