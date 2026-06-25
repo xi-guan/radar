@@ -11,6 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/skyhook-io/radar/internal/k8s"
 	bp "github.com/skyhook-io/radar/pkg/audit"
@@ -57,6 +58,22 @@ func RunFromCache(cache *k8s.ResourceCache, namespaces []string, opts *RunOption
 	mrs, xrs := listCrossplaneDynamic(namespaces)
 	input.ManagedResources = mrs
 	input.CompositeResources = xrs
+
+	// Traefik routers + their reference targets for the dangling-reference checks.
+	// Routes are scoped to the audited namespaces (they're the subjects we report
+	// on); the target inventories (Middlewares/TraefikServices) are gathered
+	// CLUSTER-WIDE so a legitimate cross-namespace reference resolves rather than
+	// being fabricated as "missing". `authoritative` marks which target GVRs are
+	// served by a synced cluster-wide informer — only those let the check assert
+	// absence (see checkTraefikDanglingRefs).
+	input.IngressRoutes, input.Middlewares, input.TraefikServices, input.TraefikAuthoritativeKinds = listTraefikDynamic(namespaces)
+	// Core Services for Traefik ref resolution. Only populate (→ only assert a
+	// missing-Service finding) when the Services informer is cluster-wide, so
+	// absence is authoritative for every namespace — same coverage gate the
+	// dynamic Traefik kinds use. Namespace-scoped fallback → leave nil → skip.
+	if len(input.IngressRoutes) > 0 && cache.IsKindClusterWide("services") {
+		input.AllServices = listNamespaced(cache.Services(), nil)
+	}
 
 	return bp.RunChecks(input)
 }
@@ -120,6 +137,105 @@ func listCrossplaneDynamic(namespaces []string) (mrs, xrs []*unstructured.Unstru
 		}
 	}
 	return mrs, xrs
+}
+
+// traefikGroups are the two CRD groups Traefik has shipped — current and legacy.
+var traefikGroups = []string{"traefik.io", "traefik.containo.us"}
+
+// traefikRefKinds are the bounded kinds the dangling-ref checks need: routers
+// plus their reference targets. (resource, kind) pairs, both v1alpha1.
+var traefikRefKinds = []struct{ resource, kind string }{
+	{"ingressroutes", "IngressRoute"},
+	{"ingressroutetcps", "IngressRouteTCP"},
+	{"ingressrouteudps", "IngressRouteUDP"},
+	{"middlewares", "Middleware"},
+	{"middlewaretcps", "MiddlewareTCP"},
+	{"traefikservices", "TraefikService"},
+}
+
+// traefikKindForResource maps the bounded ref-resources to their Kind.
+var traefikKindForResource = func() map[string]string {
+	m := make(map[string]string, len(traefikRefKinds))
+	for _, rk := range traefikRefKinds {
+		m[rk.resource] = rk.kind
+	}
+	return m
+}()
+
+// listTraefikDynamic gathers Traefik routers (scoped to `namespaces`) plus their
+// reference TARGETS (Middlewares + TraefikServices, gathered CLUSTER-WIDE so a
+// legitimate cross-namespace reference resolves). The kind set is bounded
+// (≤ 6 kinds × 2 groups), so we ensure-watch each up front (cheap; EnsureWatching
+// rejects unserved/denied GVRs via SupportsWatchGVR).
+//
+// `authoritative` keys (group\x00Kind) mark target GVRs served by a SYNCED,
+// CLUSTER-WIDE informer. Only those are authoritative for "object X is absent
+// from the cluster" — under a namespace-scoped fallback the cache knows only a
+// subset of namespaces, so the check must NOT assert absence there. This single
+// per-GVR gate fixes the false-positive (partial coverage), the per-kind
+// granularity (Middleware vs MiddlewareTCP, each its own GVR), and the
+// one-stuck-informer-suppresses-all problems together — each GVR is independent.
+func listTraefikDynamic(namespaces []string) (routes, middlewares, traefikServices []*unstructured.Unstructured, authoritative map[string]bool) {
+	cache := k8s.GetDynamicResourceCache()
+	if cache == nil {
+		return nil, nil, nil, nil
+	}
+
+	for _, group := range traefikGroups {
+		for _, rk := range traefikRefKinds {
+			gvr := schema.GroupVersionResource{Group: group, Version: "v1alpha1", Resource: rk.resource}
+			_ = cache.EnsureWatching(gvr) // best-effort; unserved/denied → no-op
+		}
+	}
+
+	nsSet := make(map[string]bool, len(namespaces))
+	for _, ns := range namespaces {
+		nsSet[ns] = true
+	}
+
+	authoritative = map[string]bool{}
+	for _, gvr := range cache.WatchedGVRs() {
+		if gvr.Group != "traefik.io" && gvr.Group != "traefik.containo.us" {
+			continue
+		}
+		kind := traefikKindForResource[gvr.Resource]
+		if kind == "" {
+			continue // not a kind the checks read
+		}
+		items, err := cache.ListWatched(gvr)
+		if err != nil {
+			if !apierrors.IsForbidden(err) && !apierrors.IsUnauthorized(err) {
+				log.Printf("[audit] Traefik scan: skipping %s/%s: %v", gvr.GroupResource(), gvr.Version, err)
+			}
+			continue
+		}
+		// A target kind is authoritative for absence only when a synced
+		// cluster-wide informer serves it.
+		isTarget := gvr.Resource != "ingressroutes" && gvr.Resource != "ingressroutetcps" && gvr.Resource != "ingressrouteudps"
+		if isTarget && cache.IsClusterWideSynced(gvr) {
+			authoritative[gvr.Group+"\x00"+kind] = true
+		}
+		for _, u := range items {
+			if u == nil {
+				continue
+			}
+			switch u.GetKind() {
+			case "IngressRoute", "IngressRouteTCP", "IngressRouteUDP":
+				// Routes are the audited subjects → scope to the requested namespaces.
+				if len(namespaces) > 0 {
+					if ns := u.GetNamespace(); ns != "" && !nsSet[ns] {
+						continue
+					}
+				}
+				routes = append(routes, u)
+			case "Middleware", "MiddlewareTCP":
+				middlewares = append(middlewares, u) // cluster-wide (cross-ns resolution)
+			case "TraefikService":
+				traefikServices = append(traefikServices, u)
+			}
+		}
+	}
+	return routes, middlewares, traefikServices, authoritative
 }
 
 // isCrossplaneMR mirrors the frontend heuristic — a Managed Resource always
@@ -246,4 +362,3 @@ func extractNamespace(obj any) string {
 	}
 	return ""
 }
-
