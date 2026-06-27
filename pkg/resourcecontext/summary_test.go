@@ -56,7 +56,11 @@ func TestBuildSummary_PodGoldens(t *testing.T) {
 					},
 				},
 			},
-			want: `{"health":"degraded"}`,
+			// A transiently-unready container with no sustained failure signal
+			// (no probe failure over the grace window, no crashloop) is healthy
+			// under the canonical classifier — not degraded, as the old coarse
+			// any-unready-container heuristic claimed.
+			want: `{"health":"healthy"}`,
 		},
 		{
 			name: "failed",
@@ -106,6 +110,16 @@ func TestBuildSummary_PodGoldens(t *testing.T) {
 	}
 }
 
+// TestBuildSummary_PodUnknownOmitted pins that a node-lost pod (phase Unknown)
+// does NOT get a false "healthy" health in the agent-facing summary — health is
+// omitted (and with no other fields, the whole summary is nil).
+func TestBuildSummary_PodUnknownOmitted(t *testing.T) {
+	pod := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodUnknown}}
+	if got := BuildSummary(pod, SummaryOptions{}); got != nil {
+		t.Fatalf("got %#v, want nil (PodUnknown health must be omitted, not healthy)", got)
+	}
+}
+
 // TestBuildSummary_DeploymentReplicasHealth covers the replica-driven
 // health heuristic across the Deployment cases.
 func TestBuildSummary_DeploymentReplicasHealth(t *testing.T) {
@@ -118,6 +132,8 @@ func TestBuildSummary_DeploymentReplicasHealth(t *testing.T) {
 		{"all_ready", 3, 3, []byte(`{"health":"healthy"}`)},
 		{"none_ready", 0, 3, []byte(`{"health":"unhealthy"}`)},
 		{"partial", 1, 3, []byte(`{"health":"degraded"}`)},
+		// Scaled to zero is intentional — health omitted (neutral collapses to ""
+		// on the summary wire until the dedicated tier lands).
 		{"scaled_to_zero", 0, 0, nil},
 	}
 	for _, c := range cases {
@@ -129,6 +145,10 @@ func TestBuildSummary_DeploymentReplicasHealth(t *testing.T) {
 				},
 				Status: appsv1.DeploymentStatus{
 					ReadyReplicas: c.ready,
+					// A steady-state Deployment has available == ready; the
+					// canonical classifier requires availability for Deployments
+					// (matching the timeline + frontend), so set it here.
+					AvailableReplicas: c.ready,
 					// Status.Replicas mirrors the actual non-terminated pod count
 					// in real clusters; we set it equal to ready here so the
 					// fixture matches a steady-state Deployment for that test.
@@ -165,8 +185,9 @@ func TestBuildSummary_DeploymentHealthDuringScaleDown(t *testing.T) {
 	dep := &appsv1.Deployment{
 		Spec: appsv1.DeploymentSpec{Replicas: &desired},
 		Status: appsv1.DeploymentStatus{
-			ReadyReplicas: 2, // all DESIRED replicas are ready
-			Replicas:      4, // but 2 extras still terminating from a scale-down
+			ReadyReplicas:     2, // all DESIRED replicas are ready
+			AvailableReplicas: 2, // and available
+			Replicas:          4, // but 2 extras still terminating from a scale-down
 		},
 	}
 	got := BuildSummary(dep, SummaryOptions{})

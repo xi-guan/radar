@@ -23,6 +23,7 @@ import (
 	"github.com/skyhook-io/radar/internal/k8s"
 	"github.com/skyhook-io/radar/internal/timeline"
 	"github.com/skyhook-io/radar/internal/traffic"
+	"github.com/skyhook-io/radar/pkg/health"
 	topology "github.com/skyhook-io/radar/pkg/topology"
 )
 
@@ -421,7 +422,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			nodeList, _ := nodeLister.List(labels.Everything())
 			resp.ResourceCounts.Nodes.Total = len(nodeList)
 			for _, n := range nodeList {
-				h := k8s.ClassifyNodeHealth(n)
+				h := health.Node(n)
 				if h.Ready {
 					if h.Unschedulable {
 						resp.ResourceCounts.Nodes.Cordoned++
@@ -515,7 +516,7 @@ func (s *Server) getDashboardCluster(ctx context.Context) DashboardCluster {
 }
 
 func (s *Server) getDashboardHealth(cache *k8s.ResourceCache, namespace string) (DashboardHealth, []DashboardProblem) {
-	health := DashboardHealth{}
+	dh := DashboardHealth{}
 	problems := make([]DashboardProblem, 0)
 
 	now := time.Now()
@@ -547,22 +548,28 @@ func (s *Server) getDashboardHealth(cache *k8s.ResourceCache, namespace string) 
 
 	if err == nil {
 		for _, pod := range pods {
-			status := classifyPodHealth(pod, now)
-			switch status {
-			case "healthy":
-				health.Healthy++
-			case "warning":
-				health.Warning++
+			switch health.Pod(pod, now).Level {
+			case health.LevelUnhealthy:
+				dh.Error++
+				collectPodForRollup(pod, "critical", now, ownerGroups, &orphanProblems)
+			case health.LevelDegraded:
+				dh.Warning++
 				// Unschedulable pods (bind-time) and stuck-creating pods
 				// (post-bind) are owned by the scheduling rows appended below,
 				// which name the actual constraint; don't also roll them up
 				// here as a bare "Pending".
-				if !k8s.IsPodUnschedulable(pod) && !postBindPods[pod.Namespace+"/"+pod.Name] {
+				if !health.IsPodUnschedulable(pod) && !postBindPods[pod.Namespace+"/"+pod.Name] {
 					collectPodForRollup(pod, "medium", now, ownerGroups, &orphanProblems)
 				}
-			case "error":
-				health.Error++
-				collectPodForRollup(pod, "critical", now, ownerGroups, &orphanProblems)
+			case health.LevelUnknown:
+				// node-lost / unobservable: count as warning so it isn't hidden in
+				// the healthy bucket, but don't add a per-pod rollup row — the Node
+				// NotReady row is the actionable signal (and the problem detector
+				// likewise defers to it), so a per-pod row would just be noise with
+				// no real reason to show.
+				dh.Warning++
+			default: // healthy, neutral
+				dh.Healthy++
 			}
 		}
 	}
@@ -711,12 +718,7 @@ func (s *Server) getDashboardHealth(cache *k8s.ResourceCache, namespace string) 
 		return problems[i].AgeSeconds < problems[j].AgeSeconds
 	})
 
-	return health, problems
-}
-
-// classifyPodHealth delegates to the shared implementation in k8s.ClassifyPodHealth.
-func classifyPodHealth(pod *corev1.Pod, now time.Time) string {
-	return k8s.ClassifyPodHealth(pod, now)
+	return dh, problems
 }
 
 func podToProblem(pod *corev1.Pod, severity string, now time.Time) DashboardProblem {
@@ -855,7 +857,7 @@ func collectPodForRollup(pod *corev1.Pod, severity string, now time.Time, groups
 		g.severity = severity
 	}
 
-	reason := k8s.PodProblemReason(pod)
+	reason := health.PodProblemReason(pod, now)
 	if reason != "" {
 		g.reasons[reason]++
 	}

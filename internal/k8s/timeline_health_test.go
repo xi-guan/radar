@@ -5,6 +5,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -19,7 +20,7 @@ func TestClassifyTimelineHealthPod(t *testing.T) {
 		want timeline.HealthState
 	}{
 		{
-			name: "succeeded pod is healthy",
+			name: "succeeded pod is healthy (completed; neutral collapses on the wire)",
 			pod:  &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
 			want: timeline.HealthHealthy,
 		},
@@ -92,13 +93,13 @@ func TestClassifyTimelineHealthWorkloads(t *testing.T) {
 		want timeline.HealthState
 	}{
 		{
-			name: "deployment scaled to zero is healthy",
+			name: "deployment scaled to zero is healthy (neutral collapses on the wire)",
 			kind: "Deployment",
 			obj:  &appsv1.Deployment{Spec: appsv1.DeploymentSpec{Replicas: ptr32(0)}},
 			want: timeline.HealthHealthy,
 		},
 		{
-			name: "daemonset matching no nodes (0/0) is healthy",
+			name: "daemonset matching no nodes (0/0) is healthy (neutral collapses on the wire)",
 			kind: "DaemonSet",
 			obj:  &appsv1.DaemonSet{Status: appsv1.DaemonSetStatus{DesiredNumberScheduled: 0, NumberReady: 0}},
 			want: timeline.HealthHealthy,
@@ -119,6 +120,18 @@ func TestClassifyTimelineHealthWorkloads(t *testing.T) {
 			name: "deployment none ready is unhealthy",
 			kind: "Deployment",
 			obj:  &appsv1.Deployment{Spec: appsv1.DeploymentSpec{Replicas: ptr32(2)}, Status: appsv1.DeploymentStatus{ReadyReplicas: 0}},
+			want: timeline.HealthUnhealthy,
+		},
+		{
+			name: "failed job is unhealthy (batch kinds now classified)",
+			kind: "Job",
+			obj:  &batchv1.Job{Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}}},
+			want: timeline.HealthUnhealthy,
+		},
+		{
+			name: "lost pvc is unhealthy",
+			kind: "PersistentVolumeClaim",
+			obj:  &corev1.PersistentVolumeClaim{Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimLost}},
 			want: timeline.HealthUnhealthy,
 		},
 		{
