@@ -368,6 +368,10 @@ func (s *Server) setupRoutes() {
 			r.Delete("/portforwards/{id}", s.handleStopPortForward)
 			r.Get("/portforwards/available/{type}/{namespace}/{name}", s.handleGetAvailablePorts)
 
+			// Curl a Service's HTTP endpoint server-side (direct in-cluster dial,
+			// no credentials). Works in-cluster/Cloud where port-forward can't.
+			r.Post("/curl/service", s.handleCurlService)
+
 			// Active sessions (for context switch confirmation)
 			r.Get("/sessions", s.handleGetSessions)
 
@@ -755,6 +759,17 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		} else if nsCaps != nil {
 			mergeNamespaceCapabilities(caps, nsCaps)
 		}
+	}
+
+	// Port-forward binds a local TCP listener on the radar host and proxies it to
+	// the pod — only reachable when radar runs as a local binary. In-cluster
+	// (Radar Cloud, reached over the tunnel) the listener would live on the radar
+	// pod, unreachable from the user's browser, so the feature can't work
+	// regardless of RBAC. Force it off after the namespace merge so a clean
+	// per-namespace RBAC grant can't re-enable a capability the runtime can't
+	// honor. Mirrors LocalTerminal's runtime-mode gate.
+	if k8s.IsInCluster() {
+		caps.PortForward = false
 	}
 
 	// Resource permissions come straight from the cached probe result, which
@@ -3753,7 +3768,7 @@ func deploymentMode() k8s.DeploymentMode {
 	if cloudMode() {
 		return k8s.DeploymentModeCloud
 	}
-	if k8s.GetKubeconfigSummary().Mode == "in-cluster" {
+	if k8s.IsInCluster() || k8s.GetKubeconfigSummary().Mode == "in-cluster" {
 		return k8s.DeploymentModeInCluster
 	}
 	return k8s.DeploymentModeLocal

@@ -2,7 +2,7 @@ import { PodRenderer as BasePodRenderer } from '@skyhook-io/k8s-ui/components/re
 import type { CopyHandler } from '@skyhook-io/k8s-ui/components/ui/drawer-components'
 import type { ResolvedEnvFrom } from '@skyhook-io/k8s-ui'
 import { useOpenTerminal, useOpenLogs } from '../../dock'
-import { useNamespacedCapabilities } from '../../../contexts/CapabilitiesContext'
+import { useNamespacedCapabilities, useIsLocalDeployment } from '../../../contexts/CapabilitiesContext'
 import { usePodMetrics, usePodMetricsHistory, usePrometheusResourceMetrics, usePrometheusStatus } from '../../../api/client'
 import { useRBACSubject } from '../../../api/rbac'
 import { PortForwardInlineButton } from '../../portforward/PortForwardButton'
@@ -27,6 +27,11 @@ export function PodRenderer({ data, onCopy, copied, onNavigate, onOpenLogs, reso
 
   // Capabilities (namespace-scoped: re-checks RBAC if globally denied)
   const { canExec, canViewLogs, canPortForward } = useNamespacedCapabilities(namespace)
+  // Show the port-forward affordance for a live forward (local + RBAC) OR when
+  // not local — in-cluster/Cloud surfaces a copy-paste kubectl command instead.
+  // The button itself picks live vs. copy-command based on deployment mode.
+  const isLocal = useIsLocalDeployment()
+  const showPortForward = canPortForward || !isLocal
 
   // Metrics
   const { data: metrics } = usePodMetrics(namespace, podName)
@@ -65,7 +70,7 @@ export function PodRenderer({ data, onCopy, copied, onNavigate, onOpenLogs, reso
       rbacError={rbacError as Error | null}
       canExec={canExec}
       canViewLogs={canViewLogs}
-      canPortForward={canPortForward}
+      canPortForward={showPortForward}
       onOpenTerminal={(params) => openTerminal(params)}
       onOpenLogsPanel={(params) => openLogsPanel(params)}
       renderPortAction={({ namespace: ns, podName: pod, port, protocol, disabled }) => (

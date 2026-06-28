@@ -10,7 +10,11 @@ interface ServiceRendererProps {
   endpointSlices?: any[]
   endpointSlicesLoading?: boolean
   onNavigate?: (ref: ResourceRef) => void
-  renderPortAction?: (props: { namespace: string; serviceName: string; port: number; protocol: string }) => ReactNode
+  renderPortAction?: (props: { namespace: string; serviceName: string; port: number; protocol: string; name?: string; appProtocol?: string }) => ReactNode
+  /** Optional full-width content rendered inside a port's card, below its header
+   *  (e.g. an inline probe panel). Lets a host attach a port-scoped panel in the
+   *  drawer flow rather than as a separate overlay. */
+  renderPortPanel?: (props: { namespace: string; serviceName: string; port: number; protocol: string; name?: string; appProtocol?: string }) => ReactNode
 }
 
 function endpointSliceAddressCount(slice: any): number {
@@ -28,7 +32,7 @@ function endpointSliceReadyClass(ready: number, total: number): string {
   return 'status-unhealthy'
 }
 
-export function ServiceRenderer({ data, onCopy, copied, endpointSlices, endpointSlicesLoading, onNavigate, renderPortAction }: ServiceRendererProps) {
+export function ServiceRenderer({ data, onCopy, copied, endpointSlices, endpointSlicesLoading, onNavigate, renderPortAction, renderPortPanel }: ServiceRendererProps) {
   const spec = data.spec || {}
   const ports = spec.ports || []
   const lbIngress = data.status?.loadBalancer?.ingress || []
@@ -95,24 +99,34 @@ export function ServiceRenderer({ data, onCopy, copied, endpointSlices, endpoint
           <div className="space-y-2">
             {ports.map((port: any, i: number) => (
               <div key={`${port.port}-${port.protocol || 'TCP'}`} className="card-inner text-sm">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-baseline gap-x-2 gap-y-0.5 min-w-0 flex-wrap">
                     <span className="text-theme-text-primary font-medium">{port.name || `port-${i + 1}`}</span>
                     <span className="text-xs text-theme-text-tertiary">{port.protocol || 'TCP'}</span>
+                    <span className="text-xs text-theme-text-secondary font-mono">
+                      {port.port}{port.targetPort != null && port.targetPort !== port.port ? ` → ${port.targetPort}` : ''}
+                      {port.nodePort ? ` (NodePort: ${port.nodePort})` : ''}
+                    </span>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 shrink-0">
                     {renderPortAction?.({
                       namespace,
                       serviceName,
                       port: port.port,
                       protocol: port.protocol || 'TCP',
+                      name: port.name,
+                      appProtocol: port.appProtocol,
                     })}
                   </div>
                 </div>
-                <div className="text-xs text-theme-text-secondary mt-1">
-                  {port.port}{port.targetPort != null && port.targetPort !== port.port ? ` → ${port.targetPort}` : ''}
-                  {port.nodePort ? ` (NodePort: ${port.nodePort})` : ''}
-                </div>
+                {renderPortPanel?.({
+                  namespace,
+                  serviceName,
+                  port: port.port,
+                  protocol: port.protocol || 'TCP',
+                  name: port.name,
+                  appProtocol: port.appProtocol,
+                })}
               </div>
             ))}
           </div>
