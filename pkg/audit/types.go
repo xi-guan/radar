@@ -4,6 +4,7 @@ import (
 	"github.com/skyhook-io/radar/pkg/checks"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -18,6 +19,8 @@ type CheckInput struct {
 	Deployments              []*appsv1.Deployment
 	StatefulSets             []*appsv1.StatefulSet
 	DaemonSets               []*appsv1.DaemonSet
+	Jobs                     []*batchv1.Job
+	CronJobs                 []*batchv1.CronJob
 	Services                 []*corev1.Service
 	Ingresses                []*networkingv1.Ingress
 	HorizontalPodAutoscalers []*autoscalingv2.HorizontalPodAutoscaler
@@ -34,6 +37,9 @@ type CheckInput struct {
 	// PodMetrics provides live CPU/memory usage for utilization checks.
 	// Optional — check is skipped when nil/empty. Callers populate from metrics-server or equivalent.
 	PodMetrics []PodMetricsInput
+	// ConfigObjectRefs lists ConfigMaps and Secrets referenced by non-core
+	// resources that the typed Kubernetes structs above do not cover.
+	ConfigObjectRefs []ConfigObjectRef
 
 	// Crossplane resources arrive unstructured because every provider ships
 	// its own CRDs — there's no typed Go schema to share across them. The
@@ -64,6 +70,13 @@ type CheckInput struct {
 	// AllServices is the cluster-wide Service list (all namespaces) for resolving
 	// Traefik route → Service references, including cross-namespace ones.
 	AllServices []*corev1.Service
+}
+
+// ConfigObjectRef identifies a ConfigMap or Secret dependency.
+type ConfigObjectRef struct {
+	Kind      string
+	Namespace string
+	Name      string
 }
 
 // PodMetricsInput provides metrics data for resource utilization checks.
