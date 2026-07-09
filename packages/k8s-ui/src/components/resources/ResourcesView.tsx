@@ -1819,6 +1819,8 @@ interface ResourcesViewData {
 export const ResourcesViewDataContext = React.createContext<ResourcesViewData>({})
 
 export interface ResourceQueryResult {
+  resourceName?: string
+  group?: string
   data?: any[]
   isLoading: boolean
   error?: any
@@ -1851,7 +1853,7 @@ interface ResourcesViewProps {
   /** @deprecated Use resourceCounts + resourceForbidden + selectedKindQuery instead */
   resourceQueries?: ResourceQueryResult[]
   // Lightweight counts for sidebar badges (from /api/resource-counts)
-  resourceCounts?: Record<string, number>
+  resourceCounts?: Record<string, number | null>
   resourceForbidden?: string[]
   /** Per-kind reason a forbidden kind is hidden ("rbac_denied" | "unavailable"),
    *  keyed by the same count key as resourceForbidden. Drives RestrictedState copy. */
@@ -1959,6 +1961,26 @@ interface ResourcesViewProps {
 
 // Default selected kind
 const DEFAULT_KIND_INFO: SelectedKindInfo = { name: 'pods', kind: 'Pod', group: '' }
+export const LOADED_RESOURCE_COUNT_TTL_MS = 5 * 60 * 1000
+
+interface LoadedResourceCount {
+  count: number
+  expiresAt: number
+}
+
+type LoadedResourceCountCache = Record<string, LoadedResourceCount>
+
+function resourceCountKey(resource: Pick<APIResource, 'group' | 'kind'>): string {
+  return resource.group ? `${resource.group}/${resource.kind}` : resource.kind
+}
+
+export function resourceQueryMatchesSelectedKind(
+  query: Pick<ResourceQueryResult, 'resourceName' | 'group'> | undefined,
+  selectedKind: SelectedKindInfo,
+): boolean {
+  if (!query?.resourceName) return true
+  return query.resourceName === selectedKind.name && (query.group ?? '') === selectedKind.group
+}
 
 // Read initial state from URL — kind is in the path: {basePath}/{kind}
 //
@@ -2006,6 +2028,53 @@ function getInitialKindFromURL(
     return { name: kind, kind: kind, group }
   }
   return defaultKind
+}
+
+export function canonicalizeSelectedKind(
+  selectedKind: SelectedKindInfo,
+  resourcesToCount: Array<Pick<APIResource, 'name' | 'kind' | 'group'>>,
+  apiResources?: APIResource[],
+): SelectedKindInfo | null {
+  const nameMatch = resourcesToCount.find(r =>
+    r.name === selectedKind.name && r.group === selectedKind.group
+  )
+  if (nameMatch) {
+    return selectedKind.kind === nameMatch.kind
+      ? null
+      : { name: nameMatch.name, kind: nameMatch.kind, group: nameMatch.group }
+  }
+
+  const match = apiResources?.find(r =>
+    r.kind === selectedKind.kind && r.group === selectedKind.group
+  )
+  return match ? { name: match.name, kind: match.kind, group: match.group } : null
+}
+
+export function deriveSidebarResourceCounts(
+  resourcesToCount: Array<Pick<APIResource, 'kind' | 'group'>>,
+  resourceCounts: Record<string, number | null> | undefined,
+  resourceUnavailable: string[] | undefined,
+  loadedCountCache: LoadedResourceCountCache,
+  now: number = Date.now(),
+): Record<string, number | null> {
+  const unavailableKinds = new Set(resourceUnavailable ?? [])
+  const results: Record<string, number | null> = {}
+
+  for (const resource of resourcesToCount) {
+    const key = resourceCountKey(resource)
+    const cached = loadedCountCache[key]
+    if (resourceCounts && key in resourceCounts) {
+      results[key] = resourceCounts[key] ?? null
+    } else if (cached && cached.expiresAt > now) {
+      results[key] = cached.count
+    } else if (unavailableKinds.has(key)) {
+      results[key] = null
+    } else {
+      results[key] = null
+    }
+  }
+
+  return results
 }
 
 // Get initial filters from URL
@@ -3158,24 +3227,15 @@ export function ResourcesView({
   // getInitialKindFromURL can't look up CRDs, so name may be wrong (e.g., 'HTTPRoute' instead of 'httproutes')
   useEffect(() => {
     if (!apiResources) return
-    // Check if current selectedKind already matches a discovered resource
-    const alreadyResolved = resourcesToCount.some(r =>
-      r.name === selectedKind.name && r.group === selectedKind.group
-    )
-    if (alreadyResolved) return
-
-    // Try to match by kind name (URL stores kind=HTTPRoute, API has name=httproutes)
-    const match = apiResources.find(r =>
-      r.kind === selectedKind.kind && r.group === selectedKind.group
-    )
-    if (match) {
-      setSelectedKind({ name: match.name, kind: match.kind, group: match.group })
+    const canonicalKind = canonicalizeSelectedKind(selectedKind, resourcesToCount, apiResources)
+    if (canonicalKind) {
+      setSelectedKind(canonicalKind)
     }
   }, [apiResources, resourcesToCount, selectedKind.name, selectedKind.kind, selectedKind.group])
 
   // Resource data — prefer new lightweight props over legacy resourceQueries array
   const resourceQueries = resourceQueriesProp ?? []
-  const useNewCountsMode = !!resourceCountsProp
+  const useNewCountsMode = resourceCountsProp !== undefined || selectedKindQueryProp !== undefined
 
   // Find the selected kind's query
   const selectedQueryIndex = useMemo(() => {
@@ -3185,7 +3245,8 @@ export function ResourcesView({
   }, [resourcesToCount, selectedKind.name, selectedKind.group])
 
   const selectedQuery = selectedKindQueryProp ?? resourceQueries[selectedQueryIndex]
-  const resources = selectedQuery?.data
+  const selectedQueryMatchesKind = resourceQueryMatchesSelectedKind(selectedQuery, selectedKind)
+  const resources = selectedQueryMatchesKind ? selectedQuery?.data : undefined
 
   // Auto-surface the GPU column the first time GPU-bearing rows load for a kind
   // the user has never customized — a static default can't know whether the
@@ -3226,24 +3287,63 @@ export function ResourcesView({
       annotation: Array.from(annotations).sort(),
     }
   }, [resources])
-  const isLoading = selectedQuery?.isLoading ?? true
-  const selectedQueryError = selectedQuery?.error
+  const isLoading = selectedQueryMatchesKind ? (selectedQuery?.isLoading ?? true) : true
+  const selectedQueryError = selectedQueryMatchesKind ? selectedQuery?.error : undefined
+  const selectedKindCountKey = selectedKind.group
+    ? `${selectedKind.group}/${selectedKind.kind}`
+    : selectedKind.kind
+  const selectedQueryHasLoadedCount = Array.isArray(resources) && !isLoading && !selectedQueryError && !largeListGuard
+  const selectedLoadedResourceCount = Array.isArray(resources) ? resources.length : undefined
+  const [loadedCountCache, setLoadedCountCache] = useState<LoadedResourceCountCache>({})
+  const namespaceScopeKey = useMemo(
+    () => namespaces.length === 0 ? '' : [...namespaces].sort().join('\0'),
+    [namespaces],
+  )
+  const loadedCountScopeRef = useRef(namespaceScopeKey)
+
+  useEffect(() => {
+    if (loadedCountScopeRef.current === namespaceScopeKey) return
+    loadedCountScopeRef.current = namespaceScopeKey
+    setLoadedCountCache({})
+  }, [namespaceScopeKey])
+
+  useEffect(() => {
+    if (!selectedQueryHasLoadedCount || selectedLoadedResourceCount == null) return
+    const now = Date.now()
+    const loadedAt = selectedQuery?.dataUpdatedAt && selectedQuery.dataUpdatedAt > 0
+      ? selectedQuery.dataUpdatedAt
+      : now
+    const expiresAt = loadedAt + LOADED_RESOURCE_COUNT_TTL_MS
+
+    setLoadedCountCache(prev => {
+      const next: LoadedResourceCountCache = {}
+      let changed = false
+      for (const [key, cached] of Object.entries(prev)) {
+        if (cached.expiresAt > now || key === selectedKindCountKey) {
+          next[key] = cached
+        } else {
+          changed = true
+        }
+      }
+
+      const existing = next[selectedKindCountKey]
+      if (existing?.count === selectedLoadedResourceCount && existing.expiresAt === expiresAt) {
+        return changed ? next : prev
+      }
+
+      return {
+        ...next,
+        [selectedKindCountKey]: { count: selectedLoadedResourceCount, expiresAt },
+      }
+    })
+  }, [selectedQueryHasLoadedCount, selectedLoadedResourceCount, selectedKindCountKey, selectedQuery?.dataUpdatedAt])
 
   // Derive counts — prefer lightweight resourceCounts prop over full query data
   const counts = useMemo(() => {
     if (useNewCountsMode) {
-      // resourceCountsProp uses "group/Kind" keys for CRDs, "Kind" for core — same format as sidebar
-      const unavailableKinds = new Set(resourceUnavailableProp ?? [])
-      const results: Record<string, number | null> = {}
-      for (const resource of resourcesToCount) {
-        const key = resource.group ? `${resource.group}/${resource.kind}` : resource.kind
-        if (unavailableKinds.has(key)) {
-          results[key] = null
-        } else if (key in resourceCountsProp!) {
-          results[key] = resourceCountsProp![key]
-        } else {
-          results[key] = 0
-        }
+      const results = deriveSidebarResourceCounts(resourcesToCount, resourceCountsProp, resourceUnavailableProp, loadedCountCache)
+      if (selectedQueryHasLoadedCount && selectedLoadedResourceCount != null) {
+        results[selectedKindCountKey] = selectedLoadedResourceCount
       }
       return results
     }
@@ -3255,7 +3355,14 @@ export function ResourcesView({
       results[key] = Array.isArray(data) ? data.length : 0
     })
     return results
-  }, [useNewCountsMode, resourcesToCount, resourceCountsProp, resourceUnavailableProp, resourceQueries])
+  }, [useNewCountsMode, resourcesToCount, resourceCountsProp, resourceUnavailableProp, loadedCountCache, selectedQueryHasLoadedCount, selectedLoadedResourceCount, selectedKindCountKey, resourceQueries])
+
+  const sidebarResourceUnavailable = useMemo(() => {
+    if (!resourceUnavailableProp?.length) {
+      return resourceUnavailableProp
+    }
+    return resourceUnavailableProp.filter(key => counts[key] == null)
+  }, [resourceUnavailableProp, counts])
 
   // Track which resource kinds returned 403 Forbidden
   const forbiddenKinds = useMemo(() => {
@@ -3276,9 +3383,6 @@ export function ResourcesView({
   // denials) OR the selected kind is in the counts `forbidden` set. Denied
   // cluster-scoped kinds return 200 with `[]` from the list endpoint, so the
   // 403 signal alone misses them — they'd fall through to "No <kind> found".
-  const selectedKindCountKey = selectedKind.group
-    ? `${selectedKind.group}/${selectedKind.kind}`
-    : selectedKind.kind
   // Actual rows win over a stale counts `forbidden` entry: a kind can be marked
   // forbidden/unavailable in counts (e.g. an informer not yet synced at counts
   // time) while the list query has since returned data — show the table, not
@@ -4009,7 +4113,7 @@ export function ResourcesView({
           apiResources={apiResourcesProp}
           resourceCounts={counts}
           resourceForbidden={Array.from(forbiddenKinds)}
-          resourceUnavailable={resourceUnavailableProp}
+          resourceUnavailable={sidebarResourceUnavailable}
           pinned={pinned}
           togglePin={togglePin}
           isPinned={isPinned}
