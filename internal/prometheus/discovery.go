@@ -14,6 +14,8 @@ import (
 	"github.com/skyhook-io/radar/pkg/prom"
 )
 
+var ErrPrometheusNotFound = errors.New("no Prometheus service found in cluster")
+
 // errDiscoverySuperseded is returned when a configuration change (Reset /
 // SetManualURL / SetHeaders) invalidated a discovery mid-flight. The result is
 // dropped rather than published; the next request rediscovers under the new
@@ -117,10 +119,13 @@ func (c *Client) discover(ctx context.Context, gen uint64) (string, string, erro
 		return "", "", err
 	}
 	if len(candidates) == 0 {
+		if err != nil {
+			return "", "", fmt.Errorf("Prometheus discovery failed: %w", err)
+		}
 		if !discoveryDiagnosticsSuppressed(ctx) {
 			errorlog.Record("prometheus", "warning", "no Prometheus service found in cluster")
 		}
-		return "", "", fmt.Errorf("no Prometheus service found in cluster")
+		return "", "", ErrPrometheusNotFound
 	}
 
 	log.Printf("[prometheus] enumerated %d candidate(s) in %s: %s", len(candidates), took(enumStart), summarizeCandidates(candidates))
@@ -228,7 +233,7 @@ func (c *Client) discover(ctx context.Context, gen uint64) (string, string, erro
 	if lastErr != nil {
 		return "", "", lastErr
 	}
-	return "", "", fmt.Errorf("no Prometheus service found in cluster")
+	return "", "", ErrPrometheusNotFound
 }
 
 // logDiscoveryEnded logs a discovery that ended on a context error, telling a
@@ -389,5 +394,7 @@ func (c *Client) markConnected(addr, basePath string, gen uint64) bool {
 	c.baseURL = addr
 	c.basePath = basePath
 	c.prom = nil
+	c.lastDiscoverErr = nil
+	c.lastDiscoverAt = time.Time{}
 	return true
 }

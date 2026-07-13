@@ -36,6 +36,8 @@ type Client struct {
 	discoveryService *prom.ServiceInfo // discovered service info for port-forward
 	manualURL        string            // --prometheus-url override
 	headers          map[string]string
+	lastDiscoverErr  error
+	lastDiscoverAt   time.Time
 
 	// discoveryGen increments whenever configuration that invalidates a
 	// discovery result changes (Reset, SetManualURL, SetHeaders). It keys the
@@ -76,6 +78,8 @@ type Client struct {
 	// without coalescing, parallel discoveries clobber each other's forwards.
 	discoverySF singleflight.Group
 }
+
+const failedDiscoveryCacheTTL = 5 * time.Second
 
 // discoveryTimeout is a hang backstop for a single coalesced discovery, not a
 // per-attempt budget. Discovery detaches from the caller's request context, so
@@ -156,6 +160,8 @@ func SetManualURL(rawURL string) {
 	globalClient.mu.Lock()
 	defer globalClient.mu.Unlock()
 	globalClient.manualURL = strings.TrimRight(rawURL, "/")
+	globalClient.lastDiscoverErr = nil
+	globalClient.lastDiscoverAt = time.Time{}
 	globalClient.discoveryGen++
 	// Abort any in-flight discovery started under the old config so it releases
 	// the discovery gate promptly rather than stalling rediscovery. Safe under
@@ -180,6 +186,8 @@ func SetHeaders(h map[string]string) {
 	// Drop the cached prom.Client so the next request rebuilds its transport
 	// with the new headers.
 	globalClient.prom = nil
+	globalClient.lastDiscoverErr = nil
+	globalClient.lastDiscoverAt = time.Time{}
 	globalClient.discoveryGen++
 	if globalClient.discoveryCancel != nil {
 		globalClient.discoveryCancel() // release the gate for the new config
@@ -212,6 +220,8 @@ func Reset() {
 		globalClient.basePath = ""
 		globalClient.prom = nil
 		globalClient.discoveryService = nil
+		globalClient.lastDiscoverErr = nil
+		globalClient.lastDiscoverAt = time.Time{}
 		globalClient.discoveryGen++
 		cancel := globalClient.discoveryCancel
 		globalClient.mu.Unlock()
@@ -301,6 +311,9 @@ func (c *Client) EnsureConnected(ctx context.Context) (string, string, error) {
 			if ok {
 				return base, bp, nil
 			}
+			if err := ctx.Err(); err != nil {
+				return "", "", err
+			}
 			log.Printf("[prometheus] cached connection to %s failed probe (reason=%s), rediscovering", base, reason)
 			c.mu.Lock()
 			c.baseURL = ""
@@ -338,6 +351,9 @@ func (c *Client) discoverShared(ctx context.Context) (string, string, error) {
 	// progress; the caller's own context bounds the loop.
 	for {
 		if err := ctx.Err(); err != nil {
+			return "", "", err
+		}
+		if err := c.recentDiscoveryError(time.Now()); err != nil {
 			return "", "", err
 		}
 
@@ -397,6 +413,14 @@ func (c *Client) discoverShared(ctx context.Context) (string, string, error) {
 
 			addr, basePath, derr := c.discover(dctx, gen)
 			if derr != nil {
+				if !errors.Is(derr, context.Canceled) && !errors.Is(derr, context.DeadlineExceeded) {
+					c.mu.Lock()
+					if !c.retired && c.discoveryGen == gen {
+						c.lastDiscoverErr = derr
+						c.lastDiscoverAt = time.Now()
+					}
+					c.mu.Unlock()
+				}
 				return nil, derr
 			}
 			return result{addr, basePath}, nil
@@ -448,6 +472,17 @@ func (c *Client) connectionLive(addr string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.baseURL == addr && !c.retired
+}
+
+func (c *Client) recentDiscoveryError(now time.Time) error {
+	c.mu.RLock()
+	err := c.lastDiscoverErr
+	at := c.lastDiscoverAt
+	c.mu.RUnlock()
+	if err == nil || at.IsZero() || now.Sub(at) >= failedDiscoveryCacheTTL {
+		return nil
+	}
+	return err
 }
 
 // Prom returns the underlying pkg/prom.Client for callers that compose

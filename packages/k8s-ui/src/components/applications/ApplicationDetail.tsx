@@ -1,19 +1,47 @@
-import { useMemo, useState, useCallback, useEffect, useRef, type ReactNode } from 'react'
-import { AlertTriangle, ArrowLeft, Boxes, ChevronDown, ExternalLink, Layers, Radio, Search } from 'lucide-react'
-import { clsx } from 'clsx'
-import type { ResourceRef, Topology, TopologyNode } from '../../types'
-import argoCdLogo from '../../assets/gitops/argocd.png'
-import fluxLogo from '../../assets/gitops/flux.svg'
-import { StatusDot, mapHealthToTone } from '../ui/status-tone'
-import { Tooltip } from '../ui/Tooltip'
-import { EmptyState } from '../ui/EmptyState'
-import { ResourceRefBadge } from '../ui/drawer-components'
-import { TopologyGraph } from '../topology/TopologyGraph'
-import { pluralize } from '../../utils/pluralize'
-import { kindToPlural, refToSelectedResource } from '../../utils/navigation'
-import { batchRunParentNodes, tagWorkloadOwnership, seedNodeIds, ownershipOf, workloadKey, type NeighborhoodSeed } from '../../utils/topology-neighborhood'
-import { workloadHue, NEUTRAL_OWNER, type WorkloadFocus } from '../../utils/workload-colors'
-import { getTopologyIcon } from '../../utils/resource-icons'
+import {
+  useMemo,
+  useState,
+  useCallback,
+  useEffect,
+  useRef,
+  type ReactNode,
+} from "react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Boxes,
+  ChevronDown,
+  DollarSign,
+  ExternalLink,
+  Layers,
+  Radio,
+  Search,
+} from "lucide-react";
+import { clsx } from "clsx";
+import type { ResourceRef, Topology, TopologyNode } from "../../types";
+import argoCdLogo from "../../assets/gitops/argocd.png";
+import fluxLogo from "../../assets/gitops/flux.svg";
+import { StatusDot, mapHealthToTone } from "../ui/status-tone";
+import { Tooltip } from "../ui/Tooltip";
+import { EmptyState } from "../ui/EmptyState";
+import { ResourceRefBadge } from "../ui/drawer-components";
+import { TopologyGraph } from "../topology/TopologyGraph";
+import { pluralize } from "../../utils/pluralize";
+import { kindToPlural, refToSelectedResource } from "../../utils/navigation";
+import {
+  batchRunParentNodes,
+  tagWorkloadOwnership,
+  seedNodeIds,
+  ownershipOf,
+  workloadKey,
+  type NeighborhoodSeed,
+} from "../../utils/topology-neighborhood";
+import {
+  workloadHue,
+  NEUTRAL_OWNER,
+  type WorkloadFocus,
+} from "../../utils/workload-colors";
+import { getTopologyIcon } from "../../utils/resource-icons";
 import {
   type AppRow,
   type AppHistory,
@@ -43,13 +71,25 @@ import {
   compareVersions,
   appSourceLabel,
   overlayProvenance,
-} from '../../utils/applications'
-import { PaneLoader } from '../ui/PaneLoader'
-import { midTruncate } from '../../utils/format'
-import { VersionTooltip, AppIdentityTooltip } from './AppTooltips'
-import { ProvenanceBadge, ClassBadge, CategoryChip, VersionInfo, BatchSignalChip } from './AppChips'
-import { ReadyBar } from './ReadyBar'
-import { collapseStableReplicaSets, layerDeploymentInventory, topologyGroup, type DeploymentInventory, type DeploymentTopologyLayer } from '../../utils/application-topology'
+} from "../../utils/applications";
+import { PaneLoader } from "../ui/PaneLoader";
+import { midTruncate } from "../../utils/format";
+import { VersionTooltip, AppIdentityTooltip } from "./AppTooltips";
+import {
+  ProvenanceBadge,
+  ClassBadge,
+  CategoryChip,
+  VersionInfo,
+  BatchSignalChip,
+} from "./AppChips";
+import { ReadyBar } from "./ReadyBar";
+import {
+  collapseStableReplicaSets,
+  layerDeploymentInventory,
+  topologyGroup,
+  type DeploymentInventory,
+  type DeploymentTopologyLayer,
+} from "../../utils/application-topology";
 
 // ApplicationDetail owns the application chrome and scope switcher. The selected
 // scope decides the one tab row shown in the detail pane: app scope gets
@@ -77,9 +117,16 @@ export interface AppIdentityInstance {
 type SelectionProps =
   | {
       selectedWorkloadKey: string | null;
-      onSelectWorkload: (key: string | null) => void;
+      onSelectWorkload: (
+        key: string | null,
+        options?: AppWorkloadSelectionOptions,
+      ) => void;
     }
   | { selectedWorkloadKey?: undefined; onSelectWorkload?: undefined };
+
+export interface AppWorkloadSelectionOptions {
+  tab?: string;
+}
 
 type CanonicalApplicationView = "overview" | "topology" | "history";
 
@@ -114,6 +161,17 @@ export type ApplicationDetailProps = {
   onBack: () => void;
   /** Render the host's WorkloadView for the chosen workload. */
   renderWorkload: (workload: SelectedAppWorkload) => ReactNode;
+  /** Optional host-rendered app-scope Cost view. When absent, no Cost tab is shown. */
+  renderCostView?: (props: {
+    app: AppRow;
+    workloads: AppWorkload[];
+    onSelectWorkload: (
+      workload: AppWorkload,
+      options?: AppWorkloadSelectionOptions,
+    ) => void;
+  }) => ReactNode;
+  costViewSelected?: boolean;
+  onSelectCostView?: () => void;
   /** Render host-scoped operational issues for the app overview. */
   renderOverviewIssues?: () => ReactNode;
   /** Whether the host-scoped issue surface contains current issues. */
@@ -123,9 +181,9 @@ export type ApplicationDetailProps = {
   topology?: Topology;
   /** True while the host's topology fetch is in flight. Without it, a
    *  multi-workload app can briefly show an empty topology while topology loads. */
-  topologyLoading?: boolean
+  topologyLoading?: boolean;
   /** Exact resources reported by the app's Argo CD, Flux, or Helm deployment source. */
-  deploymentInventory?: DeploymentInventory
+  deploymentInventory?: DeploymentInventory;
   /** Open a related (non-workload) resource clicked in the app graph. */
   onNavigateToResource?: (resource: {
     kind: string;
@@ -220,7 +278,32 @@ function compareDefinedVersions(
   return compareVersions(a, b) ?? 0;
 }
 
-export function ApplicationDetail({ app, onBack, renderWorkload, renderOverviewIssues, hasOverviewIssues, topology, topologyLoading, deploymentInventory, onNavigateToResource, onSelectWorkloadRun, identityInstances, onSwitchInstance, discoveredEnvs, activeInstanceKey, history, historyLoading, onOpenSource, selectedWorkloadKey, onSelectWorkload, selectedView, onSelectView }: ApplicationDetailProps) {
+export function ApplicationDetail({
+  app,
+  onBack,
+  renderWorkload,
+  renderCostView,
+  costViewSelected,
+  onSelectCostView,
+  renderOverviewIssues,
+  hasOverviewIssues,
+  topology,
+  topologyLoading,
+  deploymentInventory,
+  onNavigateToResource,
+  onSelectWorkloadRun,
+  identityInstances,
+  onSwitchInstance,
+  discoveredEnvs,
+  activeInstanceKey,
+  history,
+  historyLoading,
+  onOpenSource,
+  selectedWorkloadKey,
+  onSelectWorkload,
+  selectedView,
+  onSelectView,
+}: ApplicationDetailProps) {
   // Stable order regardless of API ordering: rail rows and the per-workload
   // color assignment both follow this array, so an order flap between
   // refetches must not reshuffle rows or reassign a workload's hue.
@@ -262,14 +345,27 @@ export function ApplicationDetail({ app, onBack, renderWorkload, renderOverviewI
   const [internalView, setInternalView] = useState<CanonicalApplicationView>(
     DEFAULT_APPLICATION_VIEW,
   );
+  const [internalCostSelected, setInternalCostSelected] = useState(false);
   const activeView = canonicalApplicationView(selectedView ?? internalView);
+  const costSelected = Boolean(
+    renderCostView && (costViewSelected ?? internalCostSelected),
+  );
   const setView = useCallback(
-    (view: CanonicalApplicationView) =>
-      onSelectView ? onSelectView(view) : setInternalView(view),
+    (view: CanonicalApplicationView) => {
+      setInternalCostSelected(false);
+      if (onSelectView) onSelectView(view);
+      else setInternalView(view);
+    },
     [onSelectView],
   );
+  const selectCostView = useCallback(() => {
+    if (!renderCostView) return;
+    if (onSelectCostView) onSelectCostView();
+    else setInternalCostSelected(true);
+  }, [onSelectCostView, renderCostView]);
   useEffect(() => {
     if (selectedView === undefined) setInternalView(DEFAULT_APPLICATION_VIEW);
+    setInternalCostSelected(false);
   }, [app.key, selectedView]);
 
   const [internalSelected, setInternalSelected] = useState<string | null>(null);
@@ -280,8 +376,10 @@ export function ApplicationDetail({ app, onBack, renderWorkload, renderOverviewI
       ? selectedWorkloadKey
       : (internalSelected ?? implicitSingleWorkloadKey);
   const setSelected = useCallback(
-    (key: string | null) =>
-      onSelectWorkload ? onSelectWorkload(key) : setInternalSelected(key),
+    (key: string | null, options?: AppWorkloadSelectionOptions) =>
+      onSelectWorkload
+        ? onSelectWorkload(key, options)
+        : setInternalSelected(key),
     [onSelectWorkload],
   );
   const selectedWorkload = rawSelected
@@ -304,17 +402,19 @@ export function ApplicationDetail({ app, onBack, renderWorkload, renderOverviewI
   // Hover-focus: the workload (or NEUTRAL_OWNER) whose nodes should stay lit
   // while the rest of the graph dims. Driven by the rail and, reciprocally, by
   // hovering a node.
-  const [focusedOwnerId, setFocusedOwnerId] = useState<WorkloadFocus>(null)
-  const [expandedReplicaSetOwners, setExpandedReplicaSetOwners] = useState<Set<string>>(new Set())
-  useEffect(() => setExpandedReplicaSetOwners(new Set()), [app.key])
+  const [focusedOwnerId, setFocusedOwnerId] = useState<WorkloadFocus>(null);
+  const [expandedReplicaSetOwners, setExpandedReplicaSetOwners] = useState<
+    Set<string>
+  >(new Set());
+  useEffect(() => setExpandedReplicaSetOwners(new Set()), [app.key]);
   const toggleReplicaSets = useCallback((ownerID: string) => {
     setExpandedReplicaSetOwners((current) => {
-      const next = new Set(current)
-      if (next.has(ownerID)) next.delete(ownerID)
-      else next.add(ownerID)
-      return next
-    })
-  }, [])
+      const next = new Set(current);
+      if (next.has(ownerID)) next.delete(ownerID);
+      else next.add(ownerID);
+      return next;
+    });
+  }, []);
 
   const appSeeds = useMemo(
     () =>
@@ -328,20 +428,31 @@ export function ApplicationDetail({ app, onBack, renderWorkload, renderOverviewI
   );
   // Neighborhood subgraph + per-workload color/ownership tagging in one pass.
   const composedTopology = useMemo(
-    () => topology ? collapseStableReplicaSets(topology, expandedReplicaSetOwners) : null,
+    () =>
+      topology
+        ? collapseStableReplicaSets(topology, expandedReplicaSetOwners)
+        : null,
     [topology, expandedReplicaSetOwners],
-  )
+  );
   const ownership = useMemo(
-    () => (composedTopology ? tagWorkloadOwnership(composedTopology, appSeeds) : null),
+    () =>
+      composedTopology
+        ? tagWorkloadOwnership(composedTopology, appSeeds)
+        : null,
     [composedTopology, appSeeds],
-  )
-  const appGraph = ownership?.topology ?? null
+  );
+  const appGraph = ownership?.topology ?? null;
   const deploymentLayer = useMemo(
-    () => appGraph && deploymentInventory && app.sourceRef
-      ? layerDeploymentInventory(appGraph, deploymentInventory, sourceInventoryLabel(app.sourceRef))
-      : null,
+    () =>
+      appGraph && deploymentInventory && app.sourceRef
+        ? layerDeploymentInventory(
+            appGraph,
+            deploymentInventory,
+            sourceInventoryLabel(app.sourceRef),
+          )
+        : null,
     [appGraph, deploymentInventory, app.sourceRef],
-  )
+  );
   const appGraphFocusId = useMemo(
     () => (topology ? seedNodeIds(topology, appSeeds)[0] : undefined),
     [topology, appSeeds],
@@ -370,11 +481,14 @@ export function ApplicationDetail({ app, onBack, renderWorkload, renderOverviewI
   const handleAppNodeClick = useCallback(
     (node: TopologyNode) => {
       if (node.data?.sourceInventoryGroup && app.sourceRef) {
-        onOpenSource?.(app.sourceRef)
-        return
+        onOpenSource?.(app.sourceRef);
+        return;
       }
-      const ns = (node.data?.namespace as string) || ''
-      const match = workloads.find((w) => w.kind === node.kind && w.name === node.name && w.namespace === ns)
+      const ns = (node.data?.namespace as string) || "";
+      const match = workloads.find(
+        (w) =>
+          w.kind === node.kind && w.name === node.name && w.namespace === ns,
+      );
       if (match) {
         setSelected(workloadKey(match));
         return;
@@ -399,14 +513,22 @@ export function ApplicationDetail({ app, onBack, renderWorkload, renderOverviewI
         namespace: ns,
         name: node.name,
         group: topologyGroup(node),
-      })
+      });
     },
-    [app.sourceRef, appGraph, workloads, onNavigateToResource, onOpenSource, onSelectWorkloadRun, setSelected],
-  )
+    [
+      app.sourceRef,
+      appGraph,
+      workloads,
+      onNavigateToResource,
+      onOpenSource,
+      onSelectWorkloadRun,
+      setSelected,
+    ],
+  );
 
-  const appTopology = deploymentLayer?.topology ?? appGraph ?? null
-  const appTopologyAvailable = !!appTopology && appTopology.nodes.length > 0
-  const colorByWorkload = ownership?.colorByWorkload ?? null
+  const appTopology = deploymentLayer?.topology ?? appGraph ?? null;
+  const appTopologyAvailable = !!appTopology && appTopology.nodes.length > 0;
+  const colorByWorkload = ownership?.colorByWorkload ?? null;
 
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col bg-theme-base">
@@ -561,7 +683,10 @@ export function ApplicationDetail({ app, onBack, renderWorkload, renderOverviewI
           <ApplicationWorkspace
             app={app}
             activeView={activeView}
+            costSelected={costSelected}
             onViewChange={setView}
+            onCostViewChange={selectCostView}
+            renderCostView={renderCostView}
             workloads={workloads}
             ready={ready}
             desired={desired}
@@ -577,7 +702,9 @@ export function ApplicationDetail({ app, onBack, renderWorkload, renderOverviewI
             onNodeClick={handleAppNodeClick}
             onNodeHover={handleNodeHover}
             onFocusWorkload={setFocusedOwnerId}
-            onSelectWorkload={(workload) => setSelected(workloadKey(workload))}
+            onSelectWorkload={(workload, options) =>
+              setSelected(workloadKey(workload), options)
+            }
             onNavigateToResource={onNavigateToResource}
             history={history}
             historyLoading={historyLoading}
@@ -595,7 +722,10 @@ export function ApplicationDetail({ app, onBack, renderWorkload, renderOverviewI
 function ApplicationWorkspace({
   app,
   activeView,
+  costSelected,
   onViewChange,
+  onCostViewChange,
+  renderCostView,
   workloads,
   ready,
   desired,
@@ -620,32 +750,43 @@ function ApplicationWorkspace({
   renderOverviewIssues,
   hasOverviewIssues,
 }: {
-  app: AppRow
-  activeView: CanonicalApplicationView
-  onViewChange: (view: CanonicalApplicationView) => void
-  workloads: AppWorkload[]
-  ready: number
-  desired: number
-  versions: string[]
-  topology: Topology | null
-  topologyLoading?: boolean
-  deploymentLayer: DeploymentTopologyLayer | null
-  deploymentSource?: AppSourceRef
-  topologyAvailable: boolean
-  focusNodeId?: string
-  focusedOwnerId: WorkloadFocus
-  colorByWorkload: Map<string, number> | null
-  onNodeClick: (node: TopologyNode) => void
-  onNodeHover: (node: TopologyNode | null) => void
-  onFocusWorkload: (owner: WorkloadFocus) => void
-  onSelectWorkload: (workload: AppWorkload) => void
-  onNavigateToResource?: (resource: { kind: string; namespace: string; name: string; group?: string }) => void
-  history?: AppHistory
-  historyLoading?: boolean
-  onOpenSource?: (source: AppSourceRef) => void
-  onToggleReplicaSets: (ownerID: string) => void
-  renderOverviewIssues?: () => ReactNode
-  hasOverviewIssues?: boolean
+  app: AppRow;
+  activeView: CanonicalApplicationView;
+  costSelected: boolean;
+  onViewChange: (view: CanonicalApplicationView) => void;
+  onCostViewChange: () => void;
+  renderCostView?: ApplicationDetailProps["renderCostView"];
+  workloads: AppWorkload[];
+  ready: number;
+  desired: number;
+  versions: string[];
+  topology: Topology | null;
+  topologyLoading?: boolean;
+  deploymentLayer: DeploymentTopologyLayer | null;
+  deploymentSource?: AppSourceRef;
+  topologyAvailable: boolean;
+  focusNodeId?: string;
+  focusedOwnerId: WorkloadFocus;
+  colorByWorkload: Map<string, number> | null;
+  onNodeClick: (node: TopologyNode) => void;
+  onNodeHover: (node: TopologyNode | null) => void;
+  onFocusWorkload: (owner: WorkloadFocus) => void;
+  onSelectWorkload: (
+    workload: AppWorkload,
+    options?: AppWorkloadSelectionOptions,
+  ) => void;
+  onNavigateToResource?: (resource: {
+    kind: string;
+    namespace: string;
+    name: string;
+    group?: string;
+  }) => void;
+  history?: AppHistory;
+  historyLoading?: boolean;
+  onOpenSource?: (source: AppSourceRef) => void;
+  onToggleReplicaSets: (ownerID: string) => void;
+  renderOverviewIssues?: () => ReactNode;
+  hasOverviewIssues?: boolean;
 }) {
   const historyCount =
     (history?.anchors?.length ?? 0) +
@@ -654,10 +795,18 @@ function ApplicationWorkspace({
     <div className="flex h-full min-h-0 flex-col">
       <ApplicationViewTabs
         activeView={activeView}
+        costSelected={costSelected}
+        costAvailable={Boolean(renderCostView)}
         historyCount={historyCount}
         onChange={onViewChange}
+        onCostChange={onCostViewChange}
       />
-      {activeView === "overview" && (
+      {costSelected && renderCostView && (
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
+          {renderCostView({ app, workloads, onSelectWorkload })}
+        </div>
+      )}
+      {!costSelected && activeView === "overview" && (
         <ApplicationOverview
           app={app}
           workloads={workloads}
@@ -673,7 +822,7 @@ function ApplicationWorkspace({
           hasOverviewIssues={hasOverviewIssues}
         />
       )}
-      {activeView === "topology" && (
+      {!costSelected && activeView === "topology" && (
         <ApplicationTopology
           topology={topology}
           loading={topologyLoading}
@@ -692,7 +841,7 @@ function ApplicationWorkspace({
           onToggleReplicaSets={onToggleReplicaSets}
         />
       )}
-      {activeView === "history" && (
+      {!costSelected && activeView === "history" && (
         <ApplicationHistoryView
           history={history}
           loading={historyLoading}
@@ -708,12 +857,18 @@ function ApplicationWorkspace({
 
 function ApplicationViewTabs({
   activeView,
+  costSelected,
+  costAvailable,
   historyCount,
   onChange,
+  onCostChange,
 }: {
   activeView: CanonicalApplicationView;
+  costSelected: boolean;
+  costAvailable: boolean;
   historyCount: number;
   onChange: (view: CanonicalApplicationView) => void;
+  onCostChange: () => void;
 }) {
   return (
     <div
@@ -723,7 +878,7 @@ function ApplicationViewTabs({
     >
       <div className="flex min-w-0 gap-1 overflow-x-auto">
         {APPLICATION_VIEWS.map((view) => {
-          const active = view.id === activeView;
+          const active = !costSelected && view.id === activeView;
           const badge =
             view.id === "history" && historyCount > 0 ? historyCount : null;
           return (
@@ -749,6 +904,23 @@ function ApplicationViewTabs({
             </button>
           );
         })}
+        {costAvailable && (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={costSelected}
+            onClick={onCostChange}
+            className={clsx(
+              "flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium transition-colors",
+              costSelected
+                ? "border-skyhook-500 text-theme-text-primary"
+                : "border-transparent text-theme-text-secondary hover:border-theme-border-light hover:text-theme-text-primary",
+            )}
+          >
+            <DollarSign className="h-4 w-4" />
+            Cost
+          </button>
+        )}
       </div>
     </div>
   );
@@ -778,60 +950,88 @@ function ApplicationOverview({
   renderOverviewIssues,
   hasOverviewIssues,
 }: {
-  app: AppRow
-  workloads: AppWorkload[]
-  ready: number
-  desired: number
-  versions: string[]
-  onSelectWorkload: (workload: AppWorkload) => void
-  onNavigateToResource?: (resource: { kind: string; namespace: string; name: string; group?: string }) => void
-  history?: AppHistory
-  onSelectHistory: () => void
-  onOpenSource?: (source: AppSourceRef) => void
-  renderOverviewIssues?: () => ReactNode
-  hasOverviewIssues?: boolean
+  app: AppRow;
+  workloads: AppWorkload[];
+  ready: number;
+  desired: number;
+  versions: string[];
+  onSelectWorkload: (workload: AppWorkload) => void;
+  onNavigateToResource?: (resource: {
+    kind: string;
+    namespace: string;
+    name: string;
+    group?: string;
+  }) => void;
+  history?: AppHistory;
+  onSelectHistory: () => void;
+  onOpenSource?: (source: AppSourceRef) => void;
+  renderOverviewIssues?: () => ReactNode;
+  hasOverviewIssues?: boolean;
 }) {
-  const rel = app.relationships
-  const hasEntrypoints = Boolean(rel && (relationshipRefs(rel, 'service').length > 0 || relationshipRefs(rel, 'ingress').length > 0 || relationshipRefs(rel, 'route').length > 0))
-  const hasDependencies = Boolean(rel && (
-    relationshipRefs(rel, 'config').length > 0 ||
-    relationshipRefs(rel, 'scaler').length > 0 ||
-    relationshipRefs(rel, 'storage').length > 0 ||
-    relationshipRefs(rel, 'pdb').length > 0 ||
-    relationshipRefs(rel, 'networkPolicy').length > 0
-  ))
+  const rel = app.relationships;
+  const hasEntrypoints = Boolean(
+    rel &&
+    (relationshipRefs(rel, "service").length > 0 ||
+      relationshipRefs(rel, "ingress").length > 0 ||
+      relationshipRefs(rel, "route").length > 0),
+  );
+  const hasDependencies = Boolean(
+    rel &&
+    (relationshipRefs(rel, "config").length > 0 ||
+      relationshipRefs(rel, "scaler").length > 0 ||
+      relationshipRefs(rel, "storage").length > 0 ||
+      relationshipRefs(rel, "pdb").length > 0 ||
+      relationshipRefs(rel, "networkPolicy").length > 0),
+  );
   const composition = classCompositionOf(app)
     .map(({ cls, count }) => `${count} ${cls}`)
-    .join(' / ')
-  const issues = useMemo(() => buildAppIssues(workloads, app.events ?? []), [workloads, app.events])
+    .join(" / ");
+  const issues = useMemo(
+    () => buildAppIssues(workloads, app.events ?? []),
+    [workloads, app.events],
+  );
   const currentIssuesPresent = renderOverviewIssues
-    ? hasOverviewIssues ?? issues.length > 0
-    : issues.length > 0
-  const batchActivity = useMemo(() => batchActivityForApp(app), [app])
-  const batchStats = batchOverviewStats(batchActivity)
-  const pureBatch = workloadClassOf(app.workload_class) === 'job'
-  const workloadComposition = workloadKindComposition(workloads)
-  const latestChange = history?.summary?.state === 'change' ? history.summary : undefined
-  const runtimeHealth = healthOf(app.runtimeHealth ?? worstHealth(workloads.map((workload) => workload.health)))
-  const hasDeliveryStatus = Boolean(app.sourceStatus?.sync || app.sourceStatus?.health)
-  const extraFactCount = Number(Boolean(latestChange)) + Number(hasDeliveryStatus)
+    ? (hasOverviewIssues ?? issues.length > 0)
+    : issues.length > 0;
+  const batchActivity = useMemo(() => batchActivityForApp(app), [app]);
+  const batchStats = batchOverviewStats(batchActivity);
+  const pureBatch = workloadClassOf(app.workload_class) === "job";
+  const workloadComposition = workloadKindComposition(workloads);
+  const latestChange =
+    history?.summary?.state === "change" ? history.summary : undefined;
+  const runtimeHealth = healthOf(
+    app.runtimeHealth ??
+      worstHealth(workloads.map((workload) => workload.health)),
+  );
+  const hasDeliveryStatus = Boolean(
+    app.sourceStatus?.sync || app.sourceStatus?.health,
+  );
+  const extraFactCount =
+    Number(Boolean(latestChange)) + Number(hasDeliveryStatus);
   const factGrid = pureBatch
     ? extraFactCount === 2
-      ? '2xl:grid-cols-6'
+      ? "2xl:grid-cols-6"
       : extraFactCount === 1
-        ? '2xl:grid-cols-5'
-        : '2xl:grid-cols-4'
+        ? "2xl:grid-cols-5"
+        : "2xl:grid-cols-4"
     : extraFactCount === 2
-      ? '2xl:grid-cols-5'
+      ? "2xl:grid-cols-5"
       : extraFactCount === 1
-        ? '2xl:grid-cols-4'
-        : '2xl:grid-cols-3'
+        ? "2xl:grid-cols-4"
+        : "2xl:grid-cols-3";
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">
       <div className="grid w-full max-w-[2400px] gap-4 p-4 sm:p-6 xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]">
         <div className="min-w-0 space-y-4">
-          {renderOverviewIssues ? renderOverviewIssues() : <ApplicationNow issues={issues} onSelectWorkload={onSelectWorkload} />}
+          {renderOverviewIssues ? (
+            renderOverviewIssues()
+          ) : (
+            <ApplicationNow
+              issues={issues}
+              onSelectWorkload={onSelectWorkload}
+            />
+          )}
           <ApplicationLatestHistory
             history={history}
             sourceRef={app.sourceRef}
@@ -839,29 +1039,67 @@ function ApplicationOverview({
             onSelectHistory={onSelectHistory}
             onOpenSource={onOpenSource}
           />
-          <div className={clsx('grid gap-3 md:grid-cols-2', factGrid)}>
+          <div className={clsx("grid gap-3 md:grid-cols-2", factGrid)}>
             <ApplicationFact
               label="Runtime"
-              value={pureBatch ? batchRuntimeForApp(app).label : HEALTH_META[runtimeHealth].label}
-              detail={pureBatch ? batchStats.activeDetail : desired > 0 ? `${ready}/${desired} ready` : 'No desired replicas'}
+              value={
+                pureBatch
+                  ? batchRuntimeForApp(app).label
+                  : HEALTH_META[runtimeHealth].label
+              }
+              detail={
+                pureBatch
+                  ? batchStats.activeDetail
+                  : desired > 0
+                    ? `${ready}/${desired} ready`
+                    : "No desired replicas"
+              }
             />
             {hasDeliveryStatus && (
               <ApplicationFact
                 label="Delivery"
                 value={<SourceDeliveryStatus status={app.sourceStatus!} />}
-                detail={app.sourceRef ? sourceObjectLabel(app.sourceRef) : undefined}
+                detail={
+                  app.sourceRef ? sourceObjectLabel(app.sourceRef) : undefined
+                }
               />
             )}
             {pureBatch ? (
               <>
-                <ApplicationFact label="Batch resources" value={String(workloads.length)} detail={workloadComposition || 'No workloads'} />
-                <ApplicationFact label="Active runs" value={batchStats.activeValue} detail={batchStats.activeDetail} />
-                <ApplicationFact label="Retained runs" value={batchStats.retainedValue} detail="Kubernetes-retained history" />
+                <ApplicationFact
+                  label="Batch resources"
+                  value={String(workloads.length)}
+                  detail={workloadComposition || "No workloads"}
+                />
+                <ApplicationFact
+                  label="Active runs"
+                  value={batchStats.activeValue}
+                  detail={batchStats.activeDetail}
+                />
+                <ApplicationFact
+                  label="Retained runs"
+                  value={batchStats.retainedValue}
+                  detail="Kubernetes-retained history"
+                />
               </>
             ) : (
               <>
-                <ApplicationFact label="Workloads" value={String(workloads.length)} detail={composition || 'No workloads'} />
-                <ApplicationFact label="Version" value={app.appVersion || (versions.length === 1 ? versions[0] : versions.length > 1 ? `${versions.length} versions` : 'Unknown')} />
+                <ApplicationFact
+                  label="Workloads"
+                  value={String(workloads.length)}
+                  detail={composition || "No workloads"}
+                />
+                <ApplicationFact
+                  label="Version"
+                  value={
+                    app.appVersion ||
+                    (versions.length === 1
+                      ? versions[0]
+                      : versions.length > 1
+                        ? `${versions.length} versions`
+                        : "Unknown")
+                  }
+                />
               </>
             )}
             {latestChange && (
@@ -887,9 +1125,19 @@ function ApplicationOverview({
           </ApplicationPanel>
           {!pureBatch && <ApplicationBatchOverview activity={batchActivity} />}
         </div>
-        <aside className={clsx('min-w-0 gap-4 xl:block xl:space-y-4', hasDependencies ? 'grid md:grid-cols-2' : 'max-w-xl xl:max-w-none')}>
+        <aside
+          className={clsx(
+            "min-w-0 gap-4 xl:block xl:space-y-4",
+            hasDependencies ? "grid md:grid-cols-2" : "max-w-xl xl:max-w-none",
+          )}
+        >
           <ApplicationSourceProvenance app={app} onOpenSource={onOpenSource} />
-          {hasDependencies && <ApplicationDependencies relationships={rel} onNavigateToResource={onNavigateToResource} />}
+          {hasDependencies && (
+            <ApplicationDependencies
+              relationships={rel}
+              onNavigateToResource={onNavigateToResource}
+            />
+          )}
         </aside>
       </div>
     </div>
@@ -915,21 +1163,27 @@ function ApplicationSourceProvenance({
   app,
   onOpenSource,
 }: {
-  app: AppRow
-  onOpenSource?: (source: AppSourceRef) => void
+  app: AppRow;
+  onOpenSource?: (source: AppSourceRef) => void;
 }) {
   if (app.sourceRef) {
-    const sourceName = `${app.sourceRef.namespace}/${app.sourceRef.name}`
+    const sourceName = `${app.sourceRef.namespace}/${app.sourceRef.name}`;
     return (
       <ApplicationPanel title="Deployment source">
         <div className="space-y-3">
           <div>
-            <div className="text-xs font-semibold uppercase text-theme-text-tertiary">{sourceObjectLabel(app.sourceRef)}</div>
+            <div className="text-xs font-semibold uppercase text-theme-text-tertiary">
+              {sourceObjectLabel(app.sourceRef)}
+            </div>
             <Tooltip content={sourceName} delay={150}>
-              <div className="mt-1 truncate font-mono text-sm font-medium text-theme-text-primary">{sourceName}</div>
+              <div className="mt-1 truncate font-mono text-sm font-medium text-theme-text-primary">
+                {sourceName}
+              </div>
             </Tooltip>
           </div>
-          {app.sourceStatus && <SourceDeliveryStatus status={app.sourceStatus} />}
+          {app.sourceStatus && (
+            <SourceDeliveryStatus status={app.sourceStatus} />
+          )}
           {onOpenSource && (
             <button
               type="button"
@@ -942,7 +1196,7 @@ function ApplicationSourceProvenance({
           )}
         </div>
       </ApplicationPanel>
-    )
+    );
   }
 
   if (app.sourceConflict) {
@@ -950,37 +1204,58 @@ function ApplicationSourceProvenance({
       <ApplicationPanel title="Deployment source">
         <div className="space-y-2">
           <div className="flex items-center gap-2">
-            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-500" aria-hidden />
-            <span className="text-sm font-semibold text-theme-text-primary">Multiple deployment sources detected</span>
+            <AlertTriangle
+              className="h-4 w-4 shrink-0 text-amber-500"
+              aria-hidden
+            />
+            <span className="text-sm font-semibold text-theme-text-primary">
+              Multiple deployment sources detected
+            </span>
           </div>
-          <p className="text-sm text-theme-text-secondary">Workloads in this application do not share one deployment manager.</p>
+          <p className="text-sm text-theme-text-secondary">
+            Workloads in this application do not share one deployment manager.
+          </p>
         </div>
       </ApplicationPanel>
-    )
+    );
   }
 
-  const inferred = app.identity?.confidence === 'medium'
-  const identityLabel = app.identity?.source ? appSourceLabel(app.identity.source) : undefined
-  const tierLabel = !app.identity && app.tier ? overlayProvenance(app.tier) : undefined
+  const inferred = app.identity?.confidence === "medium";
+  const identityLabel = app.identity?.source
+    ? appSourceLabel(app.identity.source)
+    : undefined;
+  const tierLabel =
+    !app.identity && app.tier ? overlayProvenance(app.tier) : undefined;
   return (
     <ApplicationPanel title="Application identity">
       <div className="space-y-2">
         <div className="flex items-center gap-2">
-          {inferred && <AlertTriangle className="h-4 w-4 shrink-0 text-amber-500" aria-hidden />}
+          {inferred && (
+            <AlertTriangle
+              className="h-4 w-4 shrink-0 text-amber-500"
+              aria-hidden
+            />
+          )}
           <span className="text-sm font-semibold text-theme-text-primary">
             {identityLabel
               ? inferred
-                ? 'Inferred application boundary'
+                ? "Inferred application boundary"
                 : `Identified by ${identityLabel}`
               : tierLabel
                 ? `Grouped by ${tierLabel} metadata`
-                : 'Grouped from Kubernetes ownership'}
+                : "Grouped from Kubernetes ownership"}
           </span>
         </div>
-        {inferred && identityLabel && <p className="text-sm text-theme-text-secondary">Matched using {identityLabel}.</p>}
+        {inferred && identityLabel && (
+          <p className="text-sm text-theme-text-secondary">
+            Matched using {identityLabel}.
+          </p>
+        )}
         {app.identity?.evidence && (
           <Tooltip content={app.identity.evidence} delay={150}>
-            <div className="truncate font-mono text-xs text-theme-text-tertiary">{app.identity.evidence}</div>
+            <div className="truncate font-mono text-xs text-theme-text-tertiary">
+              {app.identity.evidence}
+            </div>
           </Tooltip>
         )}
       </div>
@@ -992,17 +1267,22 @@ function ApplicationEntrypoints({
   relationships,
   onNavigateToResource,
 }: {
-  relationships: AppRow['relationships']
-  onNavigateToResource?: (resource: { kind: string; namespace: string; name: string; group?: string }) => void
+  relationships: AppRow["relationships"];
+  onNavigateToResource?: (resource: {
+    kind: string;
+    namespace: string;
+    name: string;
+    group?: string;
+  }) => void;
 }) {
-  const serviceRefs = relationshipRefs(relationships, 'service')
-  const ingressRefs = relationshipRefs(relationships, 'ingress')
-  const routeRefs = relationshipRefs(relationships, 'route')
-  const serviceCount = serviceRefs.length
-  const ingressCount = ingressRefs.length
-  const routeCount = routeRefs.length
-  const hasExternal = ingressCount + routeCount > 0
-  if (serviceCount + ingressCount + routeCount === 0) return null
+  const serviceRefs = relationshipRefs(relationships, "service");
+  const ingressRefs = relationshipRefs(relationships, "ingress");
+  const routeRefs = relationshipRefs(relationships, "route");
+  const serviceCount = serviceRefs.length;
+  const ingressCount = ingressRefs.length;
+  const routeCount = routeRefs.length;
+  const hasExternal = ingressCount + routeCount > 0;
+  if (serviceCount + ingressCount + routeCount === 0) return null;
 
   return (
     <ApplicationPanel title="Entrypoints">
@@ -1054,7 +1334,11 @@ function ApplicationEntrypoints({
             refs={ingressRefs}
             onNavigateToResource={onNavigateToResource}
           />
-          <ApplicationRelatedNameGroup label="Routes" refs={routeRefs} onNavigateToResource={onNavigateToResource} />
+          <ApplicationRelatedNameGroup
+            label="Routes"
+            refs={routeRefs}
+            onNavigateToResource={onNavigateToResource}
+          />
         </div>
       </div>
     </ApplicationPanel>
@@ -1065,24 +1349,67 @@ function ApplicationDependencies({
   relationships,
   onNavigateToResource,
 }: {
-  relationships: AppRow['relationships']
-  onNavigateToResource?: (resource: { kind: string; namespace: string; name: string; group?: string }) => void
+  relationships: AppRow["relationships"];
+  onNavigateToResource?: (resource: {
+    kind: string;
+    namespace: string;
+    name: string;
+    group?: string;
+  }) => void;
 }) {
-  const configs = relationshipRefs(relationships, 'config')
-  const scalers = relationshipRefs(relationships, 'scaler')
-  const storage = relationshipRefs(relationships, 'storage')
-  const pdbs = relationshipRefs(relationships, 'pdb')
-  const networkPolicies = relationshipRefs(relationships, 'networkPolicy')
-  if (configs.length + scalers.length + storage.length + pdbs.length + networkPolicies.length === 0) return null
+  const configs = relationshipRefs(relationships, "config");
+  const scalers = relationshipRefs(relationships, "scaler");
+  const storage = relationshipRefs(relationships, "storage");
+  const pdbs = relationshipRefs(relationships, "pdb");
+  const networkPolicies = relationshipRefs(relationships, "networkPolicy");
+  if (
+    configs.length +
+      scalers.length +
+      storage.length +
+      pdbs.length +
+      networkPolicies.length ===
+    0
+  )
+    return null;
 
   return (
     <ApplicationPanel title="Dependencies">
       <div className="space-y-3">
-        <ApplicationDependencyRow label="Configuration" refs={configs} totalCount={relationships?.configs} detail="ConfigMaps and Secrets referenced by app workloads." onNavigateToResource={onNavigateToResource} />
-        <ApplicationDependencyRow label="Autoscaling" refs={scalers} totalCount={relationships?.scalers} detail="Autoscalers controlling app workloads." onNavigateToResource={onNavigateToResource} />
-        <ApplicationDependencyRow label="Storage" refs={storage} totalCount={relationships?.storage} detail="PersistentVolumeClaims mounted by app workloads." onNavigateToResource={onNavigateToResource} />
-        <ApplicationDependencyRow label="Availability policy" refs={pdbs} totalCount={relationships?.pdbs} detail="PodDisruptionBudgets protecting app workloads." onNavigateToResource={onNavigateToResource} />
-        <ApplicationDependencyRow label="Network policy" refs={networkPolicies} totalCount={relationships?.networkPolicies} detail="Network policies selecting app workloads." onNavigateToResource={onNavigateToResource} />
+        <ApplicationDependencyRow
+          label="Configuration"
+          refs={configs}
+          totalCount={relationships?.configs}
+          detail="ConfigMaps and Secrets referenced by app workloads."
+          onNavigateToResource={onNavigateToResource}
+        />
+        <ApplicationDependencyRow
+          label="Autoscaling"
+          refs={scalers}
+          totalCount={relationships?.scalers}
+          detail="Autoscalers controlling app workloads."
+          onNavigateToResource={onNavigateToResource}
+        />
+        <ApplicationDependencyRow
+          label="Storage"
+          refs={storage}
+          totalCount={relationships?.storage}
+          detail="PersistentVolumeClaims mounted by app workloads."
+          onNavigateToResource={onNavigateToResource}
+        />
+        <ApplicationDependencyRow
+          label="Availability policy"
+          refs={pdbs}
+          totalCount={relationships?.pdbs}
+          detail="PodDisruptionBudgets protecting app workloads."
+          onNavigateToResource={onNavigateToResource}
+        />
+        <ApplicationDependencyRow
+          label="Network policy"
+          refs={networkPolicies}
+          totalCount={relationships?.networkPolicies}
+          detail="Network policies selecting app workloads."
+          onNavigateToResource={onNavigateToResource}
+        />
       </div>
     </ApplicationPanel>
   );
@@ -1095,14 +1422,19 @@ function ApplicationDependencyRow({
   detail,
   onNavigateToResource,
 }: {
-  label: string
-  refs: ResourceRef[]
-  totalCount?: number
-  detail: string
-  onNavigateToResource?: (resource: { kind: string; namespace: string; name: string; group?: string }) => void
+  label: string;
+  refs: ResourceRef[];
+  totalCount?: number;
+  detail: string;
+  onNavigateToResource?: (resource: {
+    kind: string;
+    namespace: string;
+    name: string;
+    group?: string;
+  }) => void;
 }) {
-  if (refs.length === 0) return null
-  const count = Math.max(totalCount ?? refs.length, refs.length)
+  if (refs.length === 0) return null;
+  const count = Math.max(totalCount ?? refs.length, refs.length);
   return (
     <div className="min-w-0 border-b border-theme-border pb-3 last:border-b-0">
       <div className="flex items-baseline justify-between gap-3">
@@ -1114,7 +1446,13 @@ function ApplicationDependencyRow({
         </span>
       </div>
       <div className="mt-1 text-xs text-theme-text-tertiary">{detail}</div>
-      <ApplicationRelatedNameGroup label={label} refs={refs} totalCount={count} onNavigateToResource={onNavigateToResource} hideLabel />
+      <ApplicationRelatedNameGroup
+        label={label}
+        refs={refs}
+        totalCount={count}
+        onNavigateToResource={onNavigateToResource}
+        hideLabel
+      />
     </div>
   );
 }
@@ -1126,55 +1464,83 @@ function ApplicationRelatedNameGroup({
   onNavigateToResource,
   hideLabel,
 }: {
-  label: string
-  refs?: ResourceRef[]
-  totalCount?: number
-  onNavigateToResource?: (resource: { kind: string; namespace: string; name: string; group?: string }) => void
-  hideLabel?: boolean
+  label: string;
+  refs?: ResourceRef[];
+  totalCount?: number;
+  onNavigateToResource?: (resource: {
+    kind: string;
+    namespace: string;
+    name: string;
+    group?: string;
+  }) => void;
+  hideLabel?: boolean;
 }) {
-  if (!refs || refs.length === 0) return null
+  if (!refs || refs.length === 0) return null;
 
-  const visible = refs.slice(0, 12)
-  const count = Math.max(totalCount ?? refs.length, refs.length)
-  const overflow = Math.max(0, count - visible.length)
+  const visible = refs.slice(0, 12);
+  const count = Math.max(totalCount ?? refs.length, refs.length);
+  const overflow = Math.max(0, count - visible.length);
   return (
-    <div className={hideLabel ? 'mt-2' : undefined}>
-      {!hideLabel && <div className="mb-1 text-xs font-medium text-theme-text-tertiary">{label}{count > 1 ? ` (${count})` : ''}</div>}
+    <div className={hideLabel ? "mt-2" : undefined}>
+      {!hideLabel && (
+        <div className="mb-1 text-xs font-medium text-theme-text-tertiary">
+          {label}
+          {count > 1 ? ` (${count})` : ""}
+        </div>
+      )}
       <div className="flex flex-wrap gap-1.5">
         {visible.map((ref) => (
           <ResourceRefBadge
-            key={`${ref.group || ''}/${ref.kind}/${ref.namespace}/${ref.name}`}
+            key={`${ref.group || ""}/${ref.kind}/${ref.namespace}/${ref.name}`}
             resourceRef={ref}
-            onClick={onNavigateToResource ? (clicked) => onNavigateToResource(refToSelectedResource(clicked)) : undefined}
+            onClick={
+              onNavigateToResource
+                ? (clicked) =>
+                    onNavigateToResource(refToSelectedResource(clicked))
+                : undefined
+            }
           />
         ))}
-        {overflow > 0 && <span className={`${CHIP} ${CHIP_TONE.muted}`}>+{overflow} more</span>}
+        {overflow > 0 && (
+          <span className={`${CHIP} ${CHIP_TONE.muted}`}>+{overflow} more</span>
+        )}
       </div>
     </div>
   );
 }
 
-type RelationshipGroup = 'service' | 'ingress' | 'route' | 'config' | 'scaler' | 'storage' | 'pdb' | 'networkPolicy'
+type RelationshipGroup =
+  | "service"
+  | "ingress"
+  | "route"
+  | "config"
+  | "scaler"
+  | "storage"
+  | "pdb"
+  | "networkPolicy";
 
-function relationshipRefs(relationships: AppRow['relationships'] | undefined, group: RelationshipGroup): ResourceRef[] {
-  if (!relationships) return []
+function relationshipRefs(
+  relationships: AppRow["relationships"] | undefined,
+  group: RelationshipGroup,
+): ResourceRef[] {
+  if (!relationships) return [];
   switch (group) {
-    case 'service':
-      return relationships.serviceRefs ?? []
-    case 'ingress':
-      return relationships.ingressRefs ?? []
-    case 'route':
-      return relationships.routeRefs ?? []
-    case 'config':
-      return relationships.configRefs ?? []
-    case 'scaler':
-      return relationships.scalerRefs ?? []
-    case 'storage':
-      return relationships.storageRefs ?? []
-    case 'pdb':
-      return relationships.pdbRefs ?? []
-    case 'networkPolicy':
-      return relationships.networkPolicyRefs ?? []
+    case "service":
+      return relationships.serviceRefs ?? [];
+    case "ingress":
+      return relationships.ingressRefs ?? [];
+    case "route":
+      return relationships.routeRefs ?? [];
+    case "config":
+      return relationships.configRefs ?? [];
+    case "scaler":
+      return relationships.scalerRefs ?? [];
+    case "storage":
+      return relationships.storageRefs ?? [];
+    case "pdb":
+      return relationships.pdbRefs ?? [];
+    case "networkPolicy":
+      return relationships.networkPolicyRefs ?? [];
   }
 }
 
@@ -1182,10 +1548,10 @@ function ApplicationNow({
   issues,
   onSelectWorkload,
 }: {
-  issues: AppIssue[]
-  onSelectWorkload: (workload: AppWorkload) => void
+  issues: AppIssue[];
+  onSelectWorkload: (workload: AppWorkload) => void;
 }) {
-  if (issues.length === 0) return null
+  if (issues.length === 0) return null;
 
   const top = issues[0];
   return (
@@ -1398,27 +1764,31 @@ function ApplicationLatestHistory({
   onSelectHistory,
   onOpenSource,
 }: {
-  history?: AppHistory
-  sourceRef?: AppSourceRef
-  showIncidentPreview?: boolean
-  onSelectHistory: () => void
-  onOpenSource?: (source: AppSourceRef) => void
+  history?: AppHistory;
+  sourceRef?: AppSourceRef;
+  showIncidentPreview?: boolean;
+  onSelectHistory: () => void;
+  onOpenSource?: (source: AppSourceRef) => void;
 }) {
-  const summary = history?.summary
-  const showIncident = summary?.state === 'incident' && showIncidentPreview
-  if (!summary || !showIncident) return null
-  const resolvedSource = sourceRef ?? history?.sourceRef
-  const tone = CHIP_TONE.amber
+  const summary = history?.summary;
+  const showIncident = summary?.state === "incident" && showIncidentPreview;
+  if (!summary || !showIncident) return null;
+  const resolvedSource = sourceRef ?? history?.sourceRef;
+  const tone = CHIP_TONE.amber;
 
   return (
     <section className="rounded-lg border border-theme-border bg-theme-surface px-4 py-3 shadow-theme-sm">
       <div className="flex flex-wrap items-start gap-3">
-        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ring-1 ring-inset ${tone}`}>
+        <span
+          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ring-1 ring-inset ${tone}`}
+        >
           <AlertTriangle className="h-4 w-4" aria-hidden />
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-sm font-semibold text-theme-text-primary">{summary.title}</h2>
+            <h2 className="text-sm font-semibold text-theme-text-primary">
+              {summary.title}
+            </h2>
             <span className={`${CHIP} ${tone}`}>Latest incident</span>
           </div>
           {summary.detail && (
@@ -1434,7 +1804,11 @@ function ApplicationLatestHistory({
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {resolvedSource && !sourceRef && onOpenSource && (
-            <button type="button" onClick={() => onOpenSource(resolvedSource)} className="rounded-md px-2.5 py-1.5 text-sm font-medium text-accent-text hover:bg-theme-hover">
+            <button
+              type="button"
+              onClick={() => onOpenSource(resolvedSource)}
+              className="rounded-md px-2.5 py-1.5 text-sm font-medium text-accent-text hover:bg-theme-hover"
+            >
               {sourceLinkLabel(resolvedSource)}
             </button>
           )}
@@ -1457,29 +1831,53 @@ function ApplicationLatestChangeFact({
   onSelectHistory,
   onOpenSource,
 }: {
-  summary: NonNullable<AppHistory['summary']>
-  sourceRef?: AppSourceRef
-  onSelectHistory: () => void
-  onOpenSource?: (source: AppSourceRef) => void
+  summary: NonNullable<AppHistory["summary"]>;
+  sourceRef?: AppSourceRef;
+  onSelectHistory: () => void;
+  onOpenSource?: (source: AppSourceRef) => void;
 }) {
   return (
     <div className="min-w-0 rounded-lg border border-theme-border bg-theme-surface px-4 py-3 shadow-theme-sm md:col-span-2 2xl:col-span-1">
       <div className="flex items-center justify-between gap-2">
-        <div className="text-[10px] font-semibold uppercase tracking-wide text-theme-text-tertiary">Latest change</div>
-        <button type="button" onClick={onSelectHistory} className="shrink-0 text-xs font-medium text-accent-text hover:underline">History</button>
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-theme-text-tertiary">
+          Latest change
+        </div>
+        <button
+          type="button"
+          onClick={onSelectHistory}
+          className="shrink-0 text-xs font-medium text-accent-text hover:underline"
+        >
+          History
+        </button>
       </div>
-      <div className="mt-1 truncate text-sm font-semibold text-theme-text-primary">{summary.title}</div>
-      {summary.detail && <div className="mt-0.5 truncate font-mono text-xs text-theme-text-tertiary">{summary.detail}</div>}
+      <div className="mt-1 truncate text-sm font-semibold text-theme-text-primary">
+        {summary.title}
+      </div>
+      {summary.detail && (
+        <div className="mt-0.5 truncate font-mono text-xs text-theme-text-tertiary">
+          {summary.detail}
+        </div>
+      )}
       {sourceRef && onOpenSource && (
-        <button type="button" onClick={() => onOpenSource(sourceRef)} className="mt-1 text-xs font-medium text-accent-text hover:underline">
+        <button
+          type="button"
+          onClick={() => onOpenSource(sourceRef)}
+          className="mt-1 text-xs font-medium text-accent-text hover:underline"
+        >
           {sourceLinkLabel(sourceRef)}
         </button>
       )}
     </div>
-  )
+  );
 }
 
-function WorkloadsMatrix({ workloads, onSelectWorkload }: { workloads: AppWorkload[]; onSelectWorkload: (workload: AppWorkload) => void }) {
+function WorkloadsMatrix({
+  workloads,
+  onSelectWorkload,
+}: {
+  workloads: AppWorkload[];
+  onSelectWorkload: (workload: AppWorkload) => void;
+}) {
   if (workloads.length === 0) {
     return <EmptyState variant="inline" headline="No inspectable workloads." />;
   }
@@ -1499,8 +1897,11 @@ function WorkloadsMatrix({ workloads, onSelectWorkload }: { workloads: AppWorklo
         </thead>
         <tbody>
           {workloads.map((w) => {
-            const status = workloadRuntimeStatus(w)
-            const reason = w.reason === 'Completed' && w.kind !== 'Job' ? undefined : w.reason
+            const status = workloadRuntimeStatus(w);
+            const reason =
+              w.reason === "Completed" && w.kind !== "Job"
+                ? undefined
+                : w.reason;
             return (
               <tr
                 key={workloadKey(w)}
@@ -1514,10 +1915,18 @@ function WorkloadsMatrix({ workloads, onSelectWorkload }: { workloads: AppWorklo
                   >
                     {w.name}
                   </button>
-                  {reason && <div className="truncate text-xs text-theme-text-tertiary">{reason}</div>}
+                  {reason && (
+                    <div className="truncate text-xs text-theme-text-tertiary">
+                      {reason}
+                    </div>
+                  )}
                 </td>
-                <td className="px-2 py-2 text-theme-text-secondary">{w.kind}</td>
-                <td className="px-2 py-2 text-theme-text-secondary">{workloadClassOf(w.workload_class)}</td>
+                <td className="px-2 py-2 text-theme-text-secondary">
+                  {w.kind}
+                </td>
+                <td className="px-2 py-2 text-theme-text-secondary">
+                  {workloadClassOf(w.workload_class)}
+                </td>
                 <td className="px-2 py-2">
                   <span className="inline-flex items-center gap-1.5 text-theme-text-secondary">
                     <StatusDot tone={mapHealthToTone(status.health)} />
@@ -1588,28 +1997,29 @@ function ApplicationTopology({
   onOpenSource,
   onToggleReplicaSets,
 }: {
-  topology: Topology | null
-  loading?: boolean
-  available: boolean
-  workloads: AppWorkload[]
-  colorByWorkload: Map<string, number> | null
-  focusNodeId?: string
-  focusedOwnerId: WorkloadFocus
-  onNodeClick: (node: TopologyNode) => void
-  onNodeHover: (node: TopologyNode | null) => void
-  onFocusWorkload: (owner: WorkloadFocus) => void
-  onSelectWorkload: (workload: AppWorkload) => void
-  deploymentLayer: DeploymentTopologyLayer | null
-  deploymentSource?: AppSourceRef
-  onOpenSource?: (source: AppSourceRef) => void
-  onToggleReplicaSets: (ownerID: string) => void
+  topology: Topology | null;
+  loading?: boolean;
+  available: boolean;
+  workloads: AppWorkload[];
+  colorByWorkload: Map<string, number> | null;
+  focusNodeId?: string;
+  focusedOwnerId: WorkloadFocus;
+  onNodeClick: (node: TopologyNode) => void;
+  onNodeHover: (node: TopologyNode | null) => void;
+  onFocusWorkload: (owner: WorkloadFocus) => void;
+  onSelectWorkload: (workload: AppWorkload) => void;
+  deploymentLayer: DeploymentTopologyLayer | null;
+  deploymentSource?: AppSourceRef;
+  onOpenSource?: (source: AppSourceRef) => void;
+  onToggleReplicaSets: (ownerID: string) => void;
 }) {
   const hasSharedOrUnscopedNodes = useMemo(
-    () => topology?.nodes.some((node) => {
-      if (node.data?.deploymentMembership === 'source-only') return false
-      const stamp = ownershipOf(node.data)
-      return !stamp.ownerWorkloadId && stamp.focusWorkloadIds.length !== 1
-    }) ?? false,
+    () =>
+      topology?.nodes.some((node) => {
+        if (node.data?.deploymentMembership === "source-only") return false;
+        const stamp = ownershipOf(node.data);
+        return !stamp.ownerWorkloadId && stamp.focusWorkloadIds.length !== 1;
+      }) ?? false,
     [topology],
   );
 
@@ -1628,7 +2038,12 @@ function ApplicationTopology({
             focusedOwnerId={focusedOwnerId}
             onNodeHover={onNodeHover}
             onToggleReplicaSets={onToggleReplicaSets}
-            fitViewPadding={{ top: 0.08, right: 0.05, bottom: 0.08, left: '360px' }}
+            fitViewPadding={{
+              top: 0.08,
+              right: 0.05,
+              bottom: 0.08,
+              left: "360px",
+            }}
           />
           <TopologyWorkloadLegend
             workloads={workloads}
@@ -1968,41 +2383,61 @@ function historyStatusTone(status: string): string {
 }
 
 function sourceLinkLabel(source: AppSourceRef): string {
-  return `View ${sourceObjectLabel(source)}`
+  return `View ${sourceObjectLabel(source)}`;
 }
 
 function sourceObjectLabel(source: AppSourceRef): string {
-  if (source.type === 'helm') return 'Helm release'
-  if (source.tool === 'argocd' || source.kind.toLowerCase() === 'application') return 'Argo CD application'
-  if (source.kind.toLowerCase() === 'helmrelease') return 'Flux HelmRelease'
-  if (source.kind.toLowerCase() === 'kustomization') return 'Flux Kustomization'
-  return 'GitOps source'
+  if (source.type === "helm") return "Helm release";
+  if (source.tool === "argocd" || source.kind.toLowerCase() === "application")
+    return "Argo CD application";
+  if (source.kind.toLowerCase() === "helmrelease") return "Flux HelmRelease";
+  if (source.kind.toLowerCase() === "kustomization")
+    return "Flux Kustomization";
+  return "GitOps source";
 }
 
 function sourceInventoryLabel(source: AppSourceRef): string {
-  if (source.type === 'helm') return 'Helm'
-  if (source.tool === 'argocd' || source.kind.toLowerCase() === 'application') return 'Argo CD'
-  if (source.tool === 'fluxcd') return 'Flux'
-  return 'GitOps'
+  if (source.type === "helm") return "Helm";
+  if (source.tool === "argocd" || source.kind.toLowerCase() === "application")
+    return "Argo CD";
+  if (source.tool === "fluxcd") return "Flux";
+  return "GitOps";
 }
 
-function SourceDeliveryStatus({ status }: { status: NonNullable<AppRow['sourceStatus']> }) {
+function SourceDeliveryStatus({
+  status,
+}: {
+  status: NonNullable<AppRow["sourceStatus"]>;
+}) {
   const values = [
-    status.sync ? { label: status.sync, tone: sourceSyncHealth(status.sync) } : null,
-    status.health ? { label: status.health, tone: sourceReportedHealth(status.health) } : null,
-  ].filter((value): value is { label: string; tone: AppHealth } => value !== null)
+    status.sync
+      ? { label: status.sync, tone: sourceSyncHealth(status.sync) }
+      : null,
+    status.health
+      ? { label: status.health, tone: sourceReportedHealth(status.health) }
+      : null,
+  ].filter(
+    (value): value is { label: string; tone: AppHealth } => value !== null,
+  );
 
   return (
     <span className="inline-flex min-w-0 items-center gap-2">
       {values.map((value, index) => (
-        <span key={`${value.label}-${index}`} className="inline-flex min-w-0 items-center gap-1.5">
-          {index > 0 && <span className="text-theme-text-tertiary" aria-hidden>·</span>}
+        <span
+          key={`${value.label}-${index}`}
+          className="inline-flex min-w-0 items-center gap-1.5"
+        >
+          {index > 0 && (
+            <span className="text-theme-text-tertiary" aria-hidden>
+              ·
+            </span>
+          )}
           <StatusDot tone={mapHealthToTone(value.tone)} />
           <span className="truncate">{value.label}</span>
         </span>
       ))}
     </span>
-  )
+  );
 }
 
 function formatAppEventTime(value?: string): string {
@@ -2035,12 +2470,12 @@ function ApplicationFact({
   monoDetail,
   variant = "card",
 }: {
-  label: string
-  value: ReactNode
-  detail?: string
-  monoValue?: boolean
-  monoDetail?: boolean
-  variant?: 'card' | 'row' | 'bare'
+  label: string;
+  value: ReactNode;
+  detail?: string;
+  monoValue?: boolean;
+  monoDetail?: boolean;
+  variant?: "card" | "row" | "bare";
 }) {
   if (variant === "row") {
     return (
@@ -2287,20 +2722,23 @@ function TopologyWorkloadLegend({
   deploymentSource,
   onOpenSource,
 }: {
-  workloads: AppWorkload[]
-  colorByWorkload: Map<string, number> | null
-  focusedOwnerId: WorkloadFocus
-  showSharedOrUnscoped: boolean
-  onFocus: (owner: WorkloadFocus) => void
-  onSelectWorkload: (workload: AppWorkload) => void
-  deploymentLayer: DeploymentTopologyLayer | null
-  deploymentSource?: AppSourceRef
-  onOpenSource?: (source: AppSourceRef) => void
+  workloads: AppWorkload[];
+  colorByWorkload: Map<string, number> | null;
+  focusedOwnerId: WorkloadFocus;
+  showSharedOrUnscoped: boolean;
+  onFocus: (owner: WorkloadFocus) => void;
+  onSelectWorkload: (workload: AppWorkload) => void;
+  deploymentLayer: DeploymentTopologyLayer | null;
+  deploymentSource?: AppSourceRef;
+  onOpenSource?: (source: AppSourceRef) => void;
 }) {
-  const managedOnlyCount = deploymentLayer?.managedOnly.length ?? 0
-  const runtimeOnlyCount = deploymentLayer?.runtimeOnlyCount ?? 0
-  const showSourceDifferences = !!deploymentSource && managedOnlyCount + runtimeOnlyCount > 0
-  const sourceLabel = deploymentSource ? sourceInventoryLabel(deploymentSource) : ''
+  const managedOnlyCount = deploymentLayer?.managedOnly.length ?? 0;
+  const runtimeOnlyCount = deploymentLayer?.runtimeOnlyCount ?? 0;
+  const showSourceDifferences =
+    !!deploymentSource && managedOnlyCount + runtimeOnlyCount > 0;
+  const sourceLabel = deploymentSource
+    ? sourceInventoryLabel(deploymentSource)
+    : "";
 
   return (
     <div className="absolute left-4 top-4 z-10 w-[min(18.5rem,calc(100%-2rem))] 2xl:w-[min(22rem,calc(100%-2rem))] overflow-hidden rounded-lg border border-theme-border bg-theme-surface/95 shadow-theme-md backdrop-blur">
@@ -2347,20 +2785,30 @@ function TopologyWorkloadLegend({
       </div>
       {showSourceDifferences && deploymentSource && (
         <div className="border-t border-theme-border px-3 py-2.5">
-          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-theme-text-tertiary">Source differences</div>
+          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-theme-text-tertiary">
+            Source differences
+          </div>
           <div className="space-y-1">
             {managedOnlyCount > 0 && (
               <div className="flex items-center gap-2 px-1.5 py-1 text-xs text-theme-text-secondary">
                 <DeploymentSourceLogo source={deploymentSource} />
                 <span className="min-w-0 flex-1">
-                  <span className="block">{managedOnlyCount} only in {sourceLabel}</span>
+                  <span className="block">
+                    {managedOnlyCount} only in {sourceLabel}
+                  </span>
                   {deploymentLayer?.managedOnlySummary && (
-                    <span className="mt-0.5 block text-[10px] text-theme-text-tertiary">{deploymentLayer.managedOnlySummary}</span>
+                    <span className="mt-0.5 block text-[10px] text-theme-text-tertiary">
+                      {deploymentLayer.managedOnlySummary}
+                    </span>
                   )}
                 </span>
                 {onOpenSource && (
                   <Tooltip content={`Open ${sourceLabel} view`} delay={150}>
-                    <button type="button" onClick={() => onOpenSource(deploymentSource)} className="rounded p-0.5 text-theme-text-tertiary hover:bg-theme-hover hover:text-theme-text-primary">
+                    <button
+                      type="button"
+                      onClick={() => onOpenSource(deploymentSource)}
+                      className="rounded p-0.5 text-theme-text-tertiary hover:bg-theme-hover hover:text-theme-text-primary"
+                    >
                       <ExternalLink className="h-3 w-3" aria-hidden />
                     </button>
                   </Tooltip>
@@ -2369,8 +2817,13 @@ function TopologyWorkloadLegend({
             )}
             {runtimeOnlyCount > 0 && (
               <div className="flex items-center gap-2 px-1.5 py-1 text-xs text-theme-text-secondary">
-                <Radio className="h-3.5 w-3.5 shrink-0 text-theme-text-tertiary" aria-hidden />
-                <span>{pluralize(runtimeOnlyCount, 'runtime-only resource')}</span>
+                <Radio
+                  className="h-3.5 w-3.5 shrink-0 text-theme-text-tertiary"
+                  aria-hidden
+                />
+                <span>
+                  {pluralize(runtimeOnlyCount, "runtime-only resource")}
+                </span>
               </div>
             )}
           </div>
@@ -2381,10 +2834,21 @@ function TopologyWorkloadLegend({
 }
 
 function DeploymentSourceLogo({ source }: { source: AppSourceRef }) {
-  const sourceLabel = sourceInventoryLabel(source)
-  const logo = sourceLabel === 'Argo CD' ? argoCdLogo : sourceLabel === 'Flux' ? fluxLogo : null
-  if (!logo) return <Layers className="h-3.5 w-3.5 shrink-0 text-theme-text-tertiary" aria-hidden />
-  return <img src={logo} alt="" className="h-4 w-4 shrink-0 object-contain" />
+  const sourceLabel = sourceInventoryLabel(source);
+  const logo =
+    sourceLabel === "Argo CD"
+      ? argoCdLogo
+      : sourceLabel === "Flux"
+        ? fluxLogo
+        : null;
+  if (!logo)
+    return (
+      <Layers
+        className="h-3.5 w-3.5 shrink-0 text-theme-text-tertiary"
+        aria-hidden
+      />
+    );
+  return <img src={logo} alt="" className="h-4 w-4 shrink-0 object-contain" />;
 }
 
 function StaticWorkloadScope({ workload }: { workload: AppWorkload }) {

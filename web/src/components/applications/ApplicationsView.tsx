@@ -35,12 +35,16 @@ import { useApplicationHistory, useApplications, useGitOpsTree, useHelmRelease, 
 import { useConnection } from '../../context/ConnectionContext'
 import { buildWorkloadPath, kindToPlural } from '../../utils/navigation'
 import { WorkloadView } from '../workload/WorkloadView'
+import { ApplicationCostTab } from '../cost/ApplicationCostTab'
+import { isOpenCostWorkloadKind } from '../cost/kinds'
 
-const APPLICATION_VIEWS: ReadonlySet<ApplicationView> = new Set<ApplicationView>(['overview', 'topology', 'history'])
+type ApplicationRouteView = ApplicationView | 'cost'
 
-function parseApplicationView(value: string | null): ApplicationView {
-  if (!value || !APPLICATION_VIEWS.has(value as ApplicationView)) return 'overview'
-  return value as ApplicationView
+const APPLICATION_VIEWS: ReadonlySet<ApplicationRouteView> = new Set<ApplicationRouteView>(['overview', 'topology', 'history', 'cost'])
+
+function parseApplicationView(value: string | null): ApplicationRouteView {
+  if (!value || !APPLICATION_VIEWS.has(value as ApplicationRouteView)) return 'overview'
+  return value as ApplicationRouteView
 }
 
 interface ApplicationsViewProps {
@@ -165,11 +169,14 @@ function AppDetailRoute({ app, apps, onBack, onOpenResource }: { app: AppRow; ap
   // workload. A single-workload app does not expose app scope.
   const [searchParams, setSearchParams] = useSearchParams()
   const viewParam = searchParams.get('view')
-  const selectedView = parseApplicationView(viewParam)
+  const selectedRouteView = parseApplicationView(viewParam)
+  const selectedView: ApplicationView = selectedRouteView === 'cost' ? 'overview' : selectedRouteView
   const selectedWorkloadParam = searchParams.get('workload')
   const appWorkloads = app.workloads ?? []
   const singleWorkloadKey = appWorkloads.length === 1 ? workloadKey(appWorkloads[0]) : null
   const selectedWorkloadKey = singleWorkloadKey ?? selectedWorkloadParam
+  const applicationCostAvailable = !singleWorkloadKey && appWorkloads.some((workload) => isOpenCostWorkloadKind(workload.kind))
+  const applicationCostSelected = selectedRouteView === 'cost' && applicationCostAvailable
   const historyQuery = useApplicationHistory(app.key, appHistoryNamespaces, { enabled: !selectedWorkloadKey })
   const sourceInventoryEnabled = !selectedWorkloadKey && selectedView === 'topology'
   const gitOpsSource = app.sourceRef?.type === 'gitops' ? app.sourceRef : undefined
@@ -194,16 +201,26 @@ function AppDetailRoute({ app, apps, onBack, onOpenResource }: { app: AppRow; ap
     params.delete('view')
     params.delete('run')
     params.set('workload', singleWorkloadKey)
+    if (selectedRouteView === 'cost') params.set('tab', 'cost')
     setSearchParams(params, { replace: true })
-  }, [searchParams, selectedWorkloadParam, setSearchParams, singleWorkloadKey, viewParam])
+  }, [searchParams, selectedRouteView, selectedWorkloadParam, setSearchParams, singleWorkloadKey, viewParam])
+  useEffect(() => {
+    if (singleWorkloadKey || selectedRouteView !== 'cost' || applicationCostAvailable) return
+    const params = new URLSearchParams(searchParams)
+    params.delete('view')
+    setSearchParams(params, { replace: true })
+  }, [applicationCostAvailable, searchParams, selectedRouteView, setSearchParams, singleWorkloadKey])
   const selectView = useCallback(
-    (view: ApplicationView) => {
+    (view: ApplicationRouteView) => {
       const params = new URLSearchParams(searchParams)
       params.delete('tab')
       params.delete('run')
       if (singleWorkloadKey) {
         params.delete('view')
         params.set('workload', singleWorkloadKey)
+      } else if (view === 'cost') {
+        params.set('view', 'cost')
+        params.delete('workload')
       } else if (view === 'overview') {
         params.delete('view')
         params.delete('workload')
@@ -216,14 +233,15 @@ function AppDetailRoute({ app, apps, onBack, onOpenResource }: { app: AppRow; ap
     [searchParams, setSearchParams, singleWorkloadKey],
   )
   const selectWorkload = useCallback(
-    (key: string | null) => {
+    (key: string | null, options?: { tab?: string }) => {
       const params = new URLSearchParams(searchParams)
       params.delete('run')
       if (key) {
         const wasInWorkloadScope = !!selectedWorkloadKey
         params.delete('view')
         params.set('workload', key)
-        if (!wasInWorkloadScope) params.delete('tab')
+        if (options?.tab) params.set('tab', options.tab)
+        else if (!wasInWorkloadScope) params.delete('tab')
       } else if (singleWorkloadKey) {
         params.delete('view')
         params.set('workload', singleWorkloadKey)
@@ -375,6 +393,17 @@ function AppDetailRoute({ app, apps, onBack, onOpenResource }: { app: AppRow; ap
         onSelectWorkload={selectWorkload}
         selectedView={selectedView}
         onSelectView={selectView}
+        costViewSelected={applicationCostSelected}
+        onSelectCostView={() => selectView('cost')}
+        renderCostView={applicationCostAvailable
+          ? ({ app, workloads, onSelectWorkload }) => (
+              <ApplicationCostTab
+                app={app}
+                workloads={workloads}
+                onSelectWorkloadCost={(workload) => onSelectWorkload(workload, { tab: 'cost' })}
+              />
+            )
+          : undefined}
         renderOverviewIssues={() => (
           <AppOverviewIssues
             issues={appIssues}
