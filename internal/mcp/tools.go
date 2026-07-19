@@ -148,11 +148,14 @@ func registerTools(server *mcp.Server, includeWrites bool) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_events",
-		Description: "Use for recent Kubernetes Warning events after an overview points " +
+		Description: "Use for recent Kubernetes events after an overview points " +
 			"at a namespace or resource, or when the symptom is scheduling, pulling images, " +
 			"restarts, failed mounts, readiness, or controller errors. Events are deduplicated " +
-			"and sorted by recency with reason, message, and count. For a ranked issue list " +
-			"that includes problems/conditions, use issues first.",
+			"and sorted Warning-groups-first, then by recency, with reason, message, and count " +
+			"— so warnings always lead, and lifecycle events (Scheduled, Pulled, Started) follow " +
+			"as timeline evidence. Set type=Warning to see only warnings, or type=Normal for " +
+			"only lifecycle events. For a ranked issue list that includes problems/conditions, " +
+			"use issues first.",
 		Annotations: readOnly,
 	}, logToolCall("get_events", handleGetEvents))
 
@@ -588,6 +591,7 @@ type eventsInput struct {
 	Limit     int    `json:"limit,omitempty" jsonschema:"max 100, default 20"`
 	Kind      string `json:"kind,omitempty" jsonschema:"filter to events involving this resource kind (e.g. Pod, Deployment)"`
 	Name      string `json:"name,omitempty" jsonschema:"filter to events involving this resource name"`
+	Type      string `json:"type,omitempty" jsonschema:"event type filter: all (default, warnings sorted first), Warning (only warnings), or Normal (only lifecycle events like Scheduled/Pulled/Started)"`
 }
 
 type getChangesInput struct {
@@ -1602,6 +1606,24 @@ func nodeNamespace(n *topology.Node) string {
 	return "(cluster)"
 }
 
+// resolveEventTypeFilter maps the get_events type input to the corev1 Event
+// Type value to keep ("" = keep everything). Default is all types — the tool
+// is named for events, not warnings, and dedup sorts Warning groups first so
+// "all" still leads with what matters while a healthy namespace shows its
+// lifecycle timeline instead of an empty result.
+func resolveEventTypeFilter(t string) (string, error) {
+	switch strings.ToLower(t) {
+	case "", "all":
+		return "", nil // no filter — all event types (the default)
+	case "warning":
+		return "Warning", nil
+	case "normal":
+		return "Normal", nil
+	default:
+		return "", fmt.Errorf("invalid type %q: use all (default), Warning, or Normal", t)
+	}
+}
+
 func handleGetEvents(ctx context.Context, req *mcp.CallToolRequest, input eventsInput) (*mcp.CallToolResult, any, error) {
 	cache := k8s.GetResourceCache()
 	if cache == nil {
@@ -1643,6 +1665,24 @@ func handleGetEvents(ctx context.Context, req *mcp.CallToolRequest, input events
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to list events: %w", err)
+	}
+
+	// Filter by event type. Default keeps all types (empty eventType); dedup
+	// sorts Warning groups ahead of Normal, so the default leads with
+	// warnings while still surfacing lifecycle timeline for a healthy
+	// resource instead of an empty result. type=Warning/Normal narrow it.
+	eventType, err := resolveEventTypeFilter(input.Type)
+	if err != nil {
+		return nil, nil, err
+	}
+	if eventType != "" {
+		filtered := events[:0]
+		for _, e := range events {
+			if e.Type == eventType {
+				filtered = append(filtered, e)
+			}
+		}
+		events = filtered
 	}
 
 	// Filter by InvolvedObject kind/name if specified
