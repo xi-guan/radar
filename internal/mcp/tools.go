@@ -61,8 +61,12 @@ func registerTools(server *mcp.Server, includeWrites bool) {
 		Name: "get_dashboard",
 		Description: "Use for inventory-style cluster or namespace health triage, like " +
 			"`kubectl get all` plus detected problems and warning events in one call. " +
-			"Returns resource counts, failing pods, unhealthy workloads, recent Warning " +
-			"events, and Helm release status so you can rank likely suspects before " +
+			"Returns resource counts, failing pods, unhealthy workloads, Warning-event " +
+			"groups (warningGroups: up to 20, ordered by lastSeen descending; use " +
+			"lastSeen for liveness, count for cumulative occurrence volume, and " +
+			"objectCount for breadth — objects is a capped sample of up to 3 involved " +
+			"resources, objectsTruncated flags more), " +
+			"and Helm release status so you can rank likely suspects before " +
 			"calling get_resource or logs. Routing: unknown broken thing -> issues; " +
 			"content/name search -> search; service routing/dependencies -> get_topology " +
 			"or get_neighborhood; inventory/counts/Helm/events overview -> get_dashboard. " +
@@ -1938,7 +1942,7 @@ type mcpDashboard struct {
 	ProblemsBySeverity map[string]int         `json:"problemsBySeverity,omitempty"` // critical/high/medium/warning counts across the full set
 	RecentChanges      []mcpChange            `json:"recentChanges,omitempty"`
 	WarningEvents      int                    `json:"warningEvents"`
-	TopWarnings        []mcpWarning           `json:"topWarnings"`
+	WarningGroups      []mcpWarning           `json:"warningGroups"`
 	HelmReleases       mcpHelmSummary         `json:"helmReleases"`
 	Metrics            *mcpMetrics            `json:"metrics,omitempty"`
 	TopologyNodes      int                    `json:"topologyNodes"`
@@ -2040,10 +2044,48 @@ func countBySeverity(problems []mcpProblem) map[string]int {
 	return out
 }
 
+// warningObjectCap bounds involved-object refs per warningGroups row. The
+// grouping is systemic (reason + normalized message), so one row can span
+// many objects; three named subjects plus objectCount conveys both "who"
+// and "how widespread" without bloating the dashboard.
+const warningObjectCap = 3
+
 type mcpWarning struct {
 	Reason  string `json:"reason"`
 	Message string `json:"message"`
 	Count   int    `json:"count"`
+	// LastSeen is the most recent occurrence across the group — without it
+	// a consumer cannot tell a stale warning from a live one, and a
+	// long-resolved BackOff reads as current behavior.
+	LastSeen time.Time `json:"lastSeen"`
+	// Objects lists up to warningObjectCap distinct involved objects
+	// (most recent first); ObjectCount is the uncapped distinct total.
+	Objects          []mcpWarningObject `json:"objects,omitempty"`
+	ObjectCount      int                `json:"objectCount,omitempty"`
+	ObjectsTruncated bool               `json:"objectsTruncated,omitempty"`
+}
+
+// mcpWarningObject is one involved object behind a warningGroups row, shaped
+// to feed straight into get_resource/diagnose (kind + group + namespace +
+// name). Group is included because bare kinds collide (core Service vs
+// Knative Service); empty means the core API group — or unknown, when no
+// sighting of the object carried an apiVersion.
+type mcpWarningObject struct {
+	Kind      string `json:"kind"`
+	Group     string `json:"group,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name"`
+}
+
+// warningObjectFromRef converts an event's involved-object ref, deriving the
+// API group from apiVersion ("apps/v1" → "apps"; "v1" → core/empty).
+func warningObjectFromRef(ref aicontext.EventObjectRef) mcpWarningObject {
+	return mcpWarningObject{
+		Kind:      ref.Kind,
+		Group:     aicontext.GroupOfAPIVersion(ref.APIVersion),
+		Namespace: ref.Namespace,
+		Name:      ref.Name,
+	}
 }
 
 type mcpHelmSummary struct {
@@ -2316,19 +2358,32 @@ func buildDashboard(ctx context.Context, cache *k8s.ResourceCache, namespace str
 		}
 		d.WarningEvents = len(warningValues)
 
-		// Deduplicate and sort by count descending to surface systemic issues
-		deduplicated := aicontext.DeduplicateEvents(warningValues)
-		sort.Slice(deduplicated, func(i, j int) bool {
-			return deduplicated[i].Count > deduplicated[j].Count
-		})
-
-		limit := min(len(deduplicated), 5)
-		for _, e := range deduplicated[:limit] {
-			d.TopWarnings = append(d.TopWarnings, mcpWarning{
-				Reason:  e.Reason,
-				Message: k8s.Truncate(e.Message, 200),
-				Count:   e.Count,
-			})
+		// Deduplicate keeping involved objects. Dedup returns groups
+		// most-recent first with deterministic tie-breakers (recency,
+		// count, reason, message, type — applied before its group cap).
+		//
+		// Emit the FULL dedup window — no row selection. Any pick-N-of-20
+		// heuristic pre-judges what the consumer needs and creates
+		// unrecoverable omissions (an agent can underweight a returned
+		// row; it cannot recover an absent one); lastSeen makes stale
+		// rows self-labeling, so extra rows are skimmable rather than
+		// misleading. Row count is bounded by the dedup helper's 20-group
+		// window (maxDeduplicatedEvents) — if that cap is ever raised for
+		// other consumers, give the dashboard its own cap here.
+		deduplicated := aicontext.DeduplicateEventsWithObjects(warningValues, warningObjectCap)
+		for _, e := range deduplicated {
+			w := mcpWarning{
+				Reason:           e.Reason,
+				Message:          k8s.Truncate(e.Message, 200),
+				Count:            e.Count,
+				LastSeen:         e.LastTimestamp,
+				ObjectCount:      e.ObjectCount,
+				ObjectsTruncated: e.ObjectsTruncated,
+			}
+			for _, o := range e.Objects {
+				w.Objects = append(w.Objects, warningObjectFromRef(o))
+			}
+			d.WarningGroups = append(d.WarningGroups, w)
 		}
 	}
 

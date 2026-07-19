@@ -55,14 +55,64 @@ type eventKey struct {
 	Type              string
 }
 
+// EventObjectRef identifies one involved object that contributed to a
+// deduplicated event group. APIVersion is carried so consumers can
+// disambiguate colliding kinds (core Service vs Knative Service) when
+// feeding the ref into resource lookups.
+type EventObjectRef struct {
+	Kind       string `json:"kind"`
+	APIVersion string `json:"apiVersion,omitempty"`
+	Namespace  string `json:"namespace,omitempty"`
+	Name       string `json:"name"`
+}
+
+// DeduplicatedEventGroup is a DeduplicatedEvent plus the distinct involved
+// objects behind it. Produced only by DeduplicateEventsWithObjects — the
+// systemic grouping key stays (Reason, normalizedMessage, Type), so one
+// group can span several objects; Objects makes that visible instead of
+// leaving an aggregated Count with no subject.
+type DeduplicatedEventGroup struct {
+	DeduplicatedEvent
+	// Objects lists distinct involved objects, most recent contribution
+	// first (ties broken by kind/namespace/name), capped by the caller;
+	// ObjectCount is the uncapped distinct total.
+	Objects          []EventObjectRef `json:"objects,omitempty"`
+	ObjectCount      int              `json:"objectCount,omitempty"`
+	ObjectsTruncated bool             `json:"objectsTruncated,omitempty"`
+}
+
 // DeduplicateEvents groups similar K8s events by (Reason, normalizedMessage),
 // collapses repeats with counts, sorts by last timestamp descending, and caps at 20.
 func DeduplicateEvents(events []corev1.Event) []DeduplicatedEvent {
+	groups := deduplicateEventGroups(events, 0)
+	if len(groups) == 0 {
+		return nil
+	}
+	result := make([]DeduplicatedEvent, len(groups))
+	for i := range groups {
+		result[i] = groups[i].DeduplicatedEvent
+	}
+	return result
+}
+
+// DeduplicateEventsWithObjects is DeduplicateEvents plus per-group involved
+// objects, for surfaces (like the dashboard) where an aggregated count
+// without a subject would be misleading. objectCap bounds Objects per group;
+// ObjectCount always carries the uncapped distinct total.
+func DeduplicateEventsWithObjects(events []corev1.Event, objectCap int) []DeduplicatedEventGroup {
+	if objectCap <= 0 {
+		objectCap = 1
+	}
+	return deduplicateEventGroups(events, objectCap)
+}
+
+func deduplicateEventGroups(events []corev1.Event, objectCap int) []DeduplicatedEventGroup {
 	if len(events) == 0 {
 		return nil
 	}
 
-	groups := make(map[eventKey]*DeduplicatedEvent)
+	groups := make(map[eventKey]*DeduplicatedEventGroup)
+	objects := make(map[eventKey]map[eventObjectIdentity]objectSighting)
 	order := make([]eventKey, 0)
 
 	for i := range events {
@@ -74,34 +124,88 @@ func DeduplicateEvents(events []corev1.Event) []DeduplicatedEvent {
 		}
 
 		last := eventLastTimestamp(ev)
-		evCount := max(int(ev.Count), 1)
+		evCount := eventOccurrenceCount(ev)
 
 		if existing, ok := groups[key]; ok {
 			existing.Count += evCount
 			if last.After(existing.LastTimestamp) {
 				existing.LastTimestamp = last
 				existing.Message = ev.Message // keep the most recent actual message
+			} else if last.Equal(existing.LastTimestamp) && ev.Message < existing.Message {
+				existing.Message = ev.Message // deterministic representative on exact ties
 			}
 		} else {
-			groups[key] = &DeduplicatedEvent{
+			groups[key] = &DeduplicatedEventGroup{DeduplicatedEvent: DeduplicatedEvent{
 				Reason:        ev.Reason,
 				Message:       ev.Message,
 				Type:          ev.Type,
 				Count:         evCount,
 				LastTimestamp: last,
-			}
+			}}
 			order = append(order, key)
+		}
+
+		// Both kind AND name required — legacy Event validation doesn't
+		// reliably enforce either, and a partial ref ("Pod/shop/" or
+		// "/shop/foo") is not a usable identity.
+		if objectCap > 0 && ev.InvolvedObject.Kind != "" && ev.InvolvedObject.Name != "" {
+			ref := EventObjectRef{
+				Kind:       ev.InvolvedObject.Kind,
+				APIVersion: ev.InvolvedObject.APIVersion,
+				Namespace:  ev.InvolvedObject.Namespace,
+				Name:       ev.InvolvedObject.Name,
+			}
+			id := identityForInvolvedObject(&ev.InvolvedObject)
+			seen := objects[key]
+			if seen == nil {
+				seen = make(map[eventObjectIdentity]objectSighting)
+				objects[key] = seen
+			}
+			prev, existed := seen[id]
+			if !existed || last.After(prev.Last) {
+				// Carry a known apiVersion across sightings — emitters are
+				// inconsistent about populating it, and losing it would
+				// mislabel the object's API group downstream.
+				if existed && ref.APIVersion == "" && prev.Ref.APIVersion != "" {
+					ref.APIVersion = prev.Ref.APIVersion
+				}
+				seen[id] = objectSighting{Ref: ref, Last: last}
+			} else if existed && prev.Ref.APIVersion == "" && ref.APIVersion != "" {
+				prev.Ref.APIVersion = ref.APIVersion
+				seen[id] = prev
+			}
 		}
 	}
 
-	result := make([]DeduplicatedEvent, 0, len(groups))
+	result := make([]DeduplicatedEventGroup, 0, len(groups))
 	for _, key := range order {
-		result = append(result, *groups[key])
+		g := *groups[key]
+		if objectCap > 0 {
+			g.Objects, g.ObjectCount, g.ObjectsTruncated = selectGroupObjects(objects[key], objectCap)
+		}
+		result = append(result, g)
 	}
 
-	// Sort by last timestamp descending (most recent first)
+	// Most recent first, with full deterministic tie-breakers BEFORE the
+	// cap — otherwise which equal-timestamp groups survive the cut depends
+	// on informer map iteration order. Type is a comparator key because it
+	// is a grouping key: Normal and Warning groups can tie on everything
+	// else.
 	sort.Slice(result, func(i, j int) bool {
-		return result[i].LastTimestamp.After(result[j].LastTimestamp)
+		a, b := result[i], result[j]
+		if !a.LastTimestamp.Equal(b.LastTimestamp) {
+			return a.LastTimestamp.After(b.LastTimestamp)
+		}
+		if a.Count != b.Count {
+			return a.Count > b.Count
+		}
+		if a.Reason != b.Reason {
+			return a.Reason < b.Reason
+		}
+		if a.Message != b.Message {
+			return a.Message < b.Message
+		}
+		return a.Type < b.Type
 	})
 
 	if len(result) > maxDeduplicatedEvents {
@@ -109,6 +213,114 @@ func DeduplicateEvents(events []corev1.Event) []DeduplicatedEvent {
 	}
 
 	return result
+}
+
+// eventObjectIdentity is the dedup key for involved objects. UID is the
+// primary identity when the emitter populated it; otherwise kind + API
+// group + namespace + name. Version-within-group is deliberately excluded —
+// it never distinguishes objects, and emitters populate apiVersion
+// inconsistently (which also means the group fallback can split one
+// non-core object seen with and without apiVersion; UID avoids that
+// whenever it is available).
+type eventObjectIdentity struct {
+	UID       string
+	Kind      string
+	Group     string
+	Namespace string
+	Name      string
+}
+
+// identityForInvolvedObject builds the dedup key: UID alone when present,
+// else the kind/group/namespace/name fallback.
+func identityForInvolvedObject(obj *corev1.ObjectReference) eventObjectIdentity {
+	if obj.UID != "" {
+		return eventObjectIdentity{UID: string(obj.UID)}
+	}
+	return eventObjectIdentity{
+		Kind:      obj.Kind,
+		Group:     GroupOfAPIVersion(obj.APIVersion),
+		Namespace: obj.Namespace,
+		Name:      obj.Name,
+	}
+}
+
+// objectSighting keeps the most recent full ref observed for one identity.
+type objectSighting struct {
+	Ref  EventObjectRef
+	Last time.Time
+}
+
+// GroupOfAPIVersion returns the API group portion of an apiVersion string
+// ("apps/v1" → "apps"; "v1" or "" → "" for the core group).
+func GroupOfAPIVersion(apiVersion string) string {
+	if idx := strings.IndexByte(apiVersion, '/'); idx > 0 {
+		return apiVersion[:idx]
+	}
+	return ""
+}
+
+// selectGroupObjects orders a group's distinct involved objects by most
+// recent contribution (ties broken by kind/namespace/name for determinism)
+// and caps the emitted list, counting distinct identities before the cap.
+// Distinct means distinct EMITTED identity (kind/group/namespace/name):
+// UID keying during collection can hold several incarnations of one name
+// (a StatefulSet pod deleted and recreated while old events linger), and
+// for a lookup-oriented surface those are one subject, not duplicates.
+func selectGroupObjects(seen map[eventObjectIdentity]objectSighting, limit int) ([]EventObjectRef, int, bool) {
+	if len(seen) == 0 {
+		return nil, 0, false
+	}
+	merged := make(map[eventObjectIdentity]objectSighting, len(seen))
+	for _, s := range seen {
+		id := eventObjectIdentity{
+			Kind:      s.Ref.Kind,
+			Group:     GroupOfAPIVersion(s.Ref.APIVersion),
+			Namespace: s.Ref.Namespace,
+			Name:      s.Ref.Name,
+		}
+		prev, existed := merged[id]
+		if !existed || s.Last.After(prev.Last) {
+			if existed && s.Ref.APIVersion == "" && prev.Ref.APIVersion != "" {
+				s.Ref.APIVersion = prev.Ref.APIVersion
+			}
+			merged[id] = s
+		} else if prev.Ref.APIVersion == "" && s.Ref.APIVersion != "" {
+			prev.Ref.APIVersion = s.Ref.APIVersion
+			merged[id] = prev
+		}
+	}
+	sightings := make([]objectSighting, 0, len(merged))
+	for _, s := range merged {
+		sightings = append(sightings, s)
+	}
+	// Sort by the emitted ref, not the identity key — UID-keyed identities
+	// carry no name fields.
+	sort.Slice(sightings, func(i, j int) bool {
+		a, b := sightings[i], sightings[j]
+		if !a.Last.Equal(b.Last) {
+			return a.Last.After(b.Last)
+		}
+		if a.Ref.Kind != b.Ref.Kind {
+			return a.Ref.Kind < b.Ref.Kind
+		}
+		if a.Ref.Namespace != b.Ref.Namespace {
+			return a.Ref.Namespace < b.Ref.Namespace
+		}
+		if a.Ref.Name != b.Ref.Name {
+			return a.Ref.Name < b.Ref.Name
+		}
+		return a.Ref.APIVersion < b.Ref.APIVersion
+	})
+	total := len(sightings)
+	truncated := total > limit
+	if truncated {
+		sightings = sightings[:limit]
+	}
+	refs := make([]EventObjectRef, len(sightings))
+	for i, s := range sightings {
+		refs[i] = s.Ref
+	}
+	return refs, total, truncated
 }
 
 // FormatEvents renders deduplicated events as a string for LLM context.
@@ -125,6 +337,13 @@ func FormatEvents(events []DeduplicatedEvent) string {
 }
 
 func eventLastTimestamp(ev *corev1.Event) time.Time {
+	// Series-style events (events.k8s.io emitters mirrored into core/v1)
+	// carry their latest occurrence in Series.LastObservedTime — legacy
+	// LastTimestamp stays zero and EventTime is the FIRST occurrence, so
+	// without this an actively repeating warning reads as stale.
+	if ev.Series != nil && !ev.Series.LastObservedTime.IsZero() {
+		return ev.Series.LastObservedTime.Time
+	}
 	if !ev.LastTimestamp.IsZero() {
 		return ev.LastTimestamp.Time
 	}
@@ -132,4 +351,13 @@ func eventLastTimestamp(ev *corev1.Event) time.Time {
 		return ev.CreationTimestamp.Time
 	}
 	return ev.EventTime.Time
+}
+
+// eventOccurrenceCount reads the aggregate occurrence count: series-style
+// events carry it in Series.Count (legacy Count stays zero for them).
+func eventOccurrenceCount(ev *corev1.Event) int {
+	if ev.Series != nil && ev.Series.Count > 0 {
+		return int(ev.Series.Count)
+	}
+	return max(int(ev.Count), 1)
 }
