@@ -1827,40 +1827,109 @@ export function formatResources(resources: any): string {
  * Used by the generic column filter system to match resources against filter values.
  * Reuses existing utility functions for kind-specific columns.
  */
-// Parse column filters from URL `filters` param (format: "col:val1,val2|col2:val3")
-// Uses `|` as pair separator between columns, `,` between values within a column.
-// Multi-select: each column key maps to an array of selected values.
+// Parse column filters from URL `filters` param. Each column is either
+// "col:val1,val2" (implicit include) or "col:exclude:val1,val2" (explicit
+// operator). `|` separates columns, `,` separates values within a column.
+// Keys and values are URI-encoded so their own delimiters survive; the operator,
+// when present, is the literal token "include" or "exclude".
 export function parseColumnFilters(filtersParam: string | null): Record<string, string[]> {
-  if (!filtersParam) return {}
-  const filters: Record<string, string[]> = {}
+  // Prototype-less accumulator: the keys come from the URL, so a plain object
+  // would expose Object.prototype as a write target (js/remote-property-injection).
+  const filters: Record<string, string[]> = Object.create(null)
+  if (!filtersParam) return filters
   for (const pair of filtersParam.split('|')) {
-    const colonIdx = pair.indexOf(':')
-    if (colonIdx > 0) {
-      const rawKey = pair.slice(0, colonIdx).trim()
-      const valStr = pair.slice(colonIdx + 1).trim()
-      // Keys are URI-encoded so a custom-column key's own colon (e.g.
-      // "label:tier") doesn't collide with the key:value delimiter.
-      let key: string
-      try { key = decodeURIComponent(rawKey) } catch { key = rawKey }
-      if (key && valStr) {
-        filters[key] = valStr.split(',').map(v => {
-          try { return decodeURIComponent(v.trim()) } catch { return v.trim() }
-        }).filter(Boolean)
-      }
+    const parsed = parseColumnFilterPair(pair)
+    // Guard the dynamic write: the key comes from the URL, so reject the
+    // prototype-polluting names right at the assignment (js/remote-property-injection).
+    if (parsed && parsed.key !== '__proto__' && parsed.key !== 'prototype' && parsed.key !== 'constructor') {
+      filters[parsed.key] = parsed.values
     }
   }
   return filters
 }
 
-// Serialize column filters to URL param format. Keys and values are both
-// URI-encoded so a colon inside a custom-column key (e.g. "label:tier") or a
-// comma inside a value (e.g. "Ready,SchedulingDisabled") survives the round-trip.
-export function serializeColumnFilters(filters: Record<string, string[]>): string {
-  const result = Object.entries(filters)
+// Serialize column filters to URL param format. Columns listed in `excludes`
+// emit the explicit "exclude" operator; all others keep the backwards-compatible
+// two-part shape. Keys and values are both URI-encoded so a colon inside a
+// custom-column key (e.g. "label:tier") or a comma inside a value (e.g.
+// "Ready,SchedulingDisabled") survives the round-trip.
+export function serializeColumnFilters(
+  filters: Record<string, string[]>,
+  excludes?: Record<string, boolean>,
+): string {
+  return Object.entries(filters)
     .filter(([, v]) => v.length > 0)
-    .map(([k, vals]) => `${encodeURIComponent(k)}:${vals.map(v => encodeURIComponent(v)).join(',')}`)
+    .map(([k, vals]) => {
+      const op = excludes?.[k] ? 'exclude:' : ''
+      return `${encodeURIComponent(k)}:${op}${vals.map(v => encodeURIComponent(v)).join(',')}`
+    })
     .join('|')
-  return result
+}
+
+// Which columns are in exclude mode (show non-matching rows). Read from the same
+// `filters` param so the operator can't drift out of sync with the values it
+// negates — a lone exclude operator with no values is structurally impossible.
+export function parseColumnFilterExcludes(filtersParam: string | null): Record<string, boolean> {
+  // Prototype-less accumulator: see parseColumnFilters (js/remote-property-injection).
+  const excludes: Record<string, boolean> = Object.create(null)
+  if (!filtersParam) return excludes
+  for (const pair of filtersParam.split('|')) {
+    const parsed = parseColumnFilterPair(pair)
+    // Guard the dynamic write against prototype-polluting keys from the URL
+    // right at the assignment (js/remote-property-injection).
+    if (
+      parsed && parsed.values.length &&
+      parsed.key !== '__proto__' && parsed.key !== 'prototype' && parsed.key !== 'constructor'
+    ) {
+      // Values are last-write-wins per key in parseColumnFilters, so the mode
+      // must track the same final segment: a later include overrides an
+      // earlier exclude for the same column, otherwise the two disagree.
+      if (parsed.exclude) {
+        excludes[parsed.key] = true
+      } else {
+        delete excludes[parsed.key]
+      }
+    }
+  }
+  return excludes
+}
+
+// Split a single "col[:operator]:values" pair into its decoded key, values, and
+// whether the explicit exclude operator was present. The first literal colon
+// delimits key from the rest (keys are encoded, so their own colons don't
+// count); an optional leading "include"/"exclude" token in the remainder is the
+// operator. Any other leading token is treated as a value (two-part form), so a
+// value literally named "exclude" without a following colon round-trips.
+function parseColumnFilterPair(
+  pair: string,
+): { key: string; values: string[]; exclude: boolean } | null {
+  const colonIdx = pair.indexOf(':')
+  if (colonIdx <= 0) return null
+  const rawKey = pair.slice(0, colonIdx).trim()
+  let rest = pair.slice(colonIdx + 1).trim()
+  let key: string
+  try { key = decodeURIComponent(rawKey) } catch { key = rawKey }
+  if (!key) return null
+  // Guard against prototype-pollution: the key becomes an object property name
+  // downstream, and it comes straight from the URL. Reject the well-known
+  // dangerous names so a crafted `filters` param can't touch the prototype.
+  if (key === '__proto__' || key === 'prototype' || key === 'constructor') return null
+
+  let exclude = false
+  const opIdx = rest.indexOf(':')
+  if (opIdx >= 0) {
+    const op = rest.slice(0, opIdx).trim().toLowerCase()
+    if (op === 'exclude' || op === 'include') {
+      exclude = op === 'exclude'
+      rest = rest.slice(opIdx + 1).trim()
+    }
+  }
+  if (!rest) return null
+  const values = rest.split(',').map(v => {
+    try { return decodeURIComponent(v.trim()) } catch { return v.trim() }
+  }).filter(Boolean)
+  if (!values.length) return null
+  return { key, values, exclude }
 }
 
 export function getCellFilterValue(resource: any, column: string, kind: string): string {
