@@ -12,10 +12,12 @@ import {
   Puzzle,
   Boxes,
   ShieldAlert,
+  Scissors,
 } from 'lucide-react'
 import { clsx } from 'clsx'
 import { SEVERITY_BADGE } from '@skyhook-io/k8s-ui/utils/badge-colors'
 import type { AddonMode } from './TrafficView'
+import type { TrafficNamePrefix } from '../../hooks/useTrafficNamePrefix'
 import { getNamespaceColor } from '../../utils/traffic-colors'
 import { Tooltip } from '../ui/Tooltip'
 import { Input } from '@skyhook-io/k8s-ui'
@@ -91,6 +93,9 @@ interface TrafficFilterSidebarProps {
    *  kept but not applied, so a neighbor in a hidden namespace still shows. */
   namespacesPausedFor?: string
 
+  // Display-only name-prefix stripping
+  namePrefix: TrafficNamePrefix
+  onNamePrefixChange: (next: TrafficNamePrefix) => void
 }
 
 // Compact toggle component with tooltip
@@ -187,6 +192,8 @@ export const TrafficFilterSidebar = memo(function TrafficFilterSidebar({
   hiddenNamespaces,
   onToggleNamespace,
   namespacesPausedFor,
+  namePrefix,
+  onNamePrefixChange,
 }: TrafficFilterSidebarProps) {
   const [namespacesExpanded, setNamespacesExpanded] = useState(false)
 
@@ -351,6 +358,23 @@ export const TrafficFilterSidebar = memo(function TrafficFilterSidebar({
               onToggle={() => setGroupByWorkload(!groupByWorkload)}
               icon={Boxes}
             />
+            <ToggleOption
+              label="Strip Name Prefix"
+              description="Hide shared prefixes from node names so the distinguishing part is readable. One pattern per line, * matches any text, !pattern keeps matching names unstripped. Display only — the full name is kept for matching."
+              enabled={namePrefix.enabled}
+              onToggle={() => onNamePrefixChange({ ...namePrefix, enabled: !namePrefix.enabled })}
+              icon={Scissors}
+            />
+            {namePrefix.enabled && (
+              <textarea
+                value={namePrefix.patterns}
+                onChange={(e) => onNamePrefixChange({ ...namePrefix, patterns: e.target.value })}
+                rows={3}
+                spellCheck={false}
+                placeholder={'vce-service-*-\n!*-gateway'}
+                className="w-full mt-1 px-2 py-1 text-[11px] font-mono rounded bg-theme-elevated border border-theme-border text-theme-text-primary placeholder:text-theme-text-tertiary focus:outline-none focus:ring-1 focus:ring-blue-500/50 resize-y"
+              />
+            )}
           </div>
         </div>
 

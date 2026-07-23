@@ -24,6 +24,8 @@ import { SEVERITY_BADGE, SEVERITY_DOT, SEVERITY_TEXT } from '@skyhook-io/k8s-ui/
 import { getNamespaceColor } from '../../utils/traffic-colors'
 import { Tooltip } from '../ui/Tooltip'
 import { isRateBasedSource, isExternalKind, requestRateOf, errorRateOf, formatRate, displayVolume, latencyWeightOf, edgesOnPort, type TrafficFocus } from './trafficFilters'
+import { stripWorkloadLabel, type TrafficNamePrefix } from '../../hooks/useTrafficNamePrefix'
+import { trafficEdgeTypes, assignEdgeLabelSides } from './TrafficFlowEdge'
 
 const elk = new ELK()
 
@@ -61,6 +63,7 @@ interface TrafficGraphProps {
   trafficSource?: string
   /** The selection, owned by the view: the graph shows it and reports clicks. */
   selection?: TrafficGraphSelection | null
+  namePrefix?: TrafficNamePrefix
   onSelectionChange?: (selection: TrafficGraphSelection | null) => void
   /** Narrows the view to a node and its neighbors. */
   onFocus?: (focus: TrafficFocus) => void
@@ -164,6 +167,7 @@ interface TrafficNodeData extends Record<string, unknown> {
   serviceCategory?: string // For external nodes: database, cloud, etc.
   ports?: PortInfo[] // All inbound ports sorted by connection count
   nodeHeight?: number // Dynamic height based on ports
+  displayLabel?: string // Label after name-prefix stripping (display only)
   connLabel?: string // Label for connections: "conn" or "req/s"
 }
 
@@ -181,7 +185,7 @@ const SERVICE_CATEGORY_COLORS: Record<string, { bg: string; border: string; dot:
   web: { bg: 'bg-blue-500/20', border: 'border-blue-500/50', dot: 'bg-blue-500' },
 }
 
-const NODE_WIDTH = 180
+const NODE_WIDTH = 240
 const NODE_BASE_HEIGHT = 56 // Base height without ports
 const NODE_PORT_HEIGHT = 18 // Height per port row
 const MAX_VISIBLE_PORTS = 4 // Maximum ports to show before "+N more"
@@ -251,7 +255,7 @@ function TrafficNode({ data }: { data: TrafficNodeData }) {
           <div className={clsx(
             'text-sm font-medium truncate',
             isAddonInternet ? 'text-purple-300' : isInternet ? 'text-sky-300' : (isAddon || isAddonNode) ? 'text-purple-200' : hasNamespaceColor ? 'text-white' : 'text-theme-text-primary'
-          )}>{data.label}</div>
+          )}>{data.displayLabel ?? data.label}</div>
           {data.namespace ? (
             <div className={clsx(
               'text-xs truncate',
@@ -1140,7 +1144,7 @@ function trafficEdgeId(sourceId: string, destId: string, flow: AggregatedFlow): 
   return `${sourceId}->${destId}:${flow.port}${flow.directionUnknown ? ':unoriented' : ''}`
 }
 
-export function TrafficGraph({ flows, hotPathThreshold = 0, showNamespaceGroups = false, serviceCategories, addonMode = 'show', trafficSource = '', selection: viewSelection, onSelectionChange, onFocus, focusedId }: TrafficGraphProps) {
+export function TrafficGraph({ flows, hotPathThreshold = 0, showNamespaceGroups = false, serviceCategories, addonMode = 'show', trafficSource = '', selection: viewSelection, namePrefix, onSelectionChange, onFocus, focusedId }: TrafficGraphProps) {
   // Beyla is rate-based too: its Connections field carries requests per second,
   // not a connection count, so it needs the same label Istio gets.
   const isRateBased = isRateBasedSource(trafficSource)
@@ -1396,7 +1400,7 @@ export function TrafficGraph({ flows, hotPathThreshold = 0, showNamespaceGroups 
         ariaLabel: flow.directionUnknown
           ? `Connection between ${sourceId} and ${destId}, direction unknown`
           : `Edge from ${sourceId} to ${destId}`,
-        type: 'smoothstep',
+        type: 'trafficFlow',
         animated: isHotEdge, // Animate hot paths
         label: edgeLabel,
         labelBgStyle: {
@@ -1430,13 +1434,18 @@ export function TrafficGraph({ flows, hotPathThreshold = 0, showNamespaceGroups 
       })
     })
 
+    assignEdgeLabelSides(edgeList)
+    nodeMap.forEach(({ data }) => {
+      data.displayLabel = stripWorkloadLabel(data.label, data.kind, namePrefix)
+    })
+
     return {
       rawNodes: Array.from(nodeMap.values()),
       rawEdges: edgeList,
       addonGroupEdge, // Pass this for adding after group is created
       addonGroupOutEdge, // Pass this for adding group → kubernetes edge
     }
-  }, [flows, hotPathThreshold, showNamespaceGroups, serviceCategories, addonMode, isRateBased, connLabel])
+  }, [flows, hotPathThreshold, showNamespaceGroups, serviceCategories, addonMode, isRateBased, connLabel, namePrefix])
 
   // Apply ELK layout
   const applyLayout = useCallback(async () => {
@@ -1728,6 +1737,7 @@ export function TrafficGraph({ flows, hotPathThreshold = 0, showNamespaceGroups 
         onEdgeClick={onEdgeClick}
         onPaneClick={onPaneClick}
         nodeTypes={nodeTypes}
+        edgeTypes={trafficEdgeTypes}
         defaultEdgeOptions={{
           type: 'smoothstep',
           style: { strokeWidth: 2, stroke: '#6b7280' },
