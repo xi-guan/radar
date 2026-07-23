@@ -26,6 +26,7 @@ const props = (overrides: Partial<Props>): Props => ({
   dnsPattern: '', setDnsPattern: vi.fn(),
   namespaces: [{ name: 'demo', nodeCount: 3 }],
   hiddenNamespaces: new Set(), onToggleNamespace: vi.fn(),
+  namePrefix: { enabled: false, patterns: '' }, onNamePrefixChange: vi.fn(),
   ...overrides,
 })
 

@@ -15,6 +15,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useDock } from '../dock'
 import { AlertBanner, EmptyState, PaneLoader, FreshnessControl } from '@skyhook-io/k8s-ui'
 import { useConnection } from '../../context/ConnectionContext'
+import { useTrafficNamePrefix } from '../../hooks/useTrafficNamePrefix'
 import { Tooltip } from '../ui/Tooltip'
 import { SEVERITY_TEXT } from '@skyhook-io/k8s-ui/utils/badge-colors'
 import { matchesStatusRanges, bucketsFromCounts, bucketsFromStatus, isRateBasedSource, keepAvailable, effectiveThreshold, volumeUnit, type VolumeUnit, isExternalKind, mergeFlowVolume, coverageLabel, type GraphFlow, endpointPair, graphEndpoint, graphEndpointId, mergeRawPairs, mergedEdgePort, selectedEdgeMatcher, selectionRawPairs, selectionMatch, graphSize, GRAPH_DRAW_BUDGET, GRAPH_DRAW_CEILING, parseFocus, focusParam, focusId, focusNeighborhood, touchesFocus, endpointSummaries, namespaceSummaries, verdictChoices, type TrafficFocus } from './trafficFilters'
@@ -413,6 +414,7 @@ export function TrafficView({ namespaces, onSetNamespaces }: TrafficViewProps) {
   // The view the graph was last drawn for, and so keeps drawing (up to the
   // ceiling) as refreshes move its size: set by drawing it or by Draw anyway.
   const [drawnViewKey, setDrawnViewKey] = useState<string | null>(null)
+  const { namePrefix, setNamePrefix } = useTrafficNamePrefix()
   const dock = useDock()
   const graphPaneRef = useRef<HTMLDivElement>(null)
 
@@ -1438,6 +1440,8 @@ export function TrafficView({ namespaces, onSetNamespaces }: TrafficViewProps) {
         hiddenNamespaces={chosenHiddenNamespaces}
         onToggleNamespace={toggleNamespace}
         namespacesPausedFor={focus?.name}
+        namePrefix={namePrefix}
+        onNamePrefixChange={setNamePrefix}
       />
 
       {/* Main content area */}
@@ -1639,6 +1643,7 @@ export function TrafficView({ namespaces, onSetNamespaces }: TrafficViewProps) {
                   addonMode={groupAddons ? 'group' : addonMode === 'group' ? 'show' : addonMode}
                   trafficSource={sourcesData?.active || ''}
                   selection={graphSelection}
+                  namePrefix={namePrefix}
                   onSelectionChange={setGraphSelection}
                   onFocus={setFocus}
                   focusedId={focusKey}
