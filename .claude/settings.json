@@ -1,9 +1,5 @@
 {
-  "permissions": {
-    "allow": [
-      "Bash(./scripts/visual-test-start.sh)",
-      "Bash(./scripts/visual-test-start.sh:*)",
-      "Bash(./scripts/visual-test-stop.sh)"
-    ]
+  "enabledPlugins": {
+    "systems-programming@claude-code-workflows": true
   }
 }
