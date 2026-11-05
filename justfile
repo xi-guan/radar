@@ -135,33 +135,47 @@ stop:
     pkill -9 -f './radar' 2>/dev/null || true
     echo "✓ stopped"
 
-# build + push fork image, deploy to k3d-dcsp sandbox via gitea + flux
-deploy-sandbox tag="":
+# build + push fork image, deploy to a dcsp sandbox (k3d | z600) via gitea + flux
+deploy-sandbox target tag="":
     #!/usr/bin/env bash
     set -euo pipefail
-    ctx="k3d-dcsp"
+    case "{{ target }}" in
+        k3d)  ctx="k3d-dcsp";  arch="arm64"; branch="k3d" ;;
+        z600) ctx="z600-dcsp"; arch="amd64"; branch="main" ;;
+        *) echo "✗ unknown target '{{ target }}' (expected k3d or z600)" >&2; exit 1 ;;
+    esac
     sandbox="$HOME/volvo/dcsp-readonly/_k8s-flux-sandbox"
+    source "$sandbox/_scripts/registry-auth.sh"
     radar_yaml="infrastructure/base/controllers/radar.yaml"
     tag="{{ tag }}"
     [[ -n "$tag" ]] || tag="$(date +%Y%m%d-%H%M)"
     image="gitea.susie.se/dcsp/radar:$tag"
-    log=$(mktemp); trap 'rm -f "$log"' EXIT
-    echo "→ building $image (arm64)"
+    chart="$(git describe --tags --match 'v[0-9]*' --exclude '*-*' --abbrev=0)"
+    chart="${chart#v}"
+    # the sandbox checkout is often behind gitea or dirty, so the bump is committed from a throwaway worktree
+    wt="$(mktemp -d)/sandbox"
+    log=$(mktemp); trap 'rm -f "$log"; git -C "$sandbox" worktree remove --force "$wt" 2>/dev/null || true; rmdir "${wt%/*}"; registry_cleanup' EXIT
+    curl -fsSL https://skyhook-io.github.io/helm-charts/index.yaml | yq '.entries.radar[].version' | grep -x "$chart" >/dev/null \
+        || { echo "✗ chart radar $chart is not in the skyhook helm repo yet" >&2; exit 1; }
+    registry_login || { echo "✗ gitea registry login failed — check keychain item dcsp-package" >&2; exit 1; }
+    echo "→ building $image ($arch)"
     # both flags required: DOCKER_DEFAULT_PLATFORM=amd64 in env, and the
     # Dockerfile's ARG TARGETARCH=amd64 default overrides --platform alone
-    docker build --platform linux/arm64 --build-arg TARGETARCH=arm64 \
+    docker build --platform "linux/$arch" --build-arg TARGETARCH="$arch" \
         --build-arg VERSION="$tag" --target full -t "$image" . >"$log" 2>&1 \
         || { cat "$log" >&2; exit 1; }
-    grep -q "GOARCH=arm64" "$log" || { echo "✗ binary is not arm64 (no GOARCH=arm64 in build log) — do not trust the manifest"; exit 1; }
+    grep -q "GOARCH=$arch" "$log" || { echo "✗ binary is not $arch (no GOARCH=$arch in build log) — do not trust the manifest"; exit 1; }
     echo "→ pushing $image"
     docker push "$image" >"$log" 2>&1 || { cat "$log" >&2; exit 1; }
-    echo "→ bumping tag in $radar_yaml"
-    sed -i '' "s|tag: \".*\"|tag: \"$tag\"|" "$sandbox/$radar_yaml"
-    if git -C "$sandbox" diff --quiet -- "$radar_yaml"; then
-        echo "⚠ tag unchanged in $radar_yaml — skipping commit (k3d will not re-pull an existing tag)"
+    echo "→ bumping $radar_yaml on gitea/$branch (tag $tag, chart $chart)"
+    git -C "$sandbox" fetch -q gitea "$branch"
+    git -C "$sandbox" worktree add -q --detach "$wt" "gitea/$branch"
+    sed -i '' -e "s|tag: \".*\"|tag: \"$tag\"|" -e "s|^\( *\)version: \".*\"|\1version: \"$chart\"|" "$wt/$radar_yaml"
+    if git -C "$wt" diff --quiet -- "$radar_yaml"; then
+        echo "⚠ $radar_yaml unchanged — skipping commit (the cluster will not re-pull an existing tag)"
     else
-        git -C "$sandbox" commit -m "radar: bump to $tag" -- "$radar_yaml"
-        git -C "$sandbox" push gitea k3d
+        git -C "$wt" commit -q -m "radar: bump to $tag, chart $chart" -- "$radar_yaml"
+        git -C "$wt" push -q gitea "HEAD:$branch"
     fi
     echo "→ flux reconcile ($ctx)"
     flux --context "$ctx" reconcile source git flux-system -n flux-system
